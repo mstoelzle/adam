@@ -212,11 +212,14 @@ class KinDynComputations:
         Returns:
             G (jnp.array): the gravity term
         """
+        batch_shape = base_transform.shape[:-2]
+        base_vel = jnp.zeros(batch_shape + (6,), dtype=self.g.dtype)
+        joints_vel = jnp.zeros(batch_shape + (self.NDoF,), dtype=self.g.dtype)
         return self.rbdalgos.rnea(
             base_transform,
             joint_positions,
-            np.zeros(6),
-            np.zeros(self.NDoF),
+            base_vel,
+            joints_vel,
             self.g,
         ).array.squeeze()
 
