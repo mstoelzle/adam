@@ -149,9 +149,9 @@ def test_aba(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     torques = (
         torch.randn(
-            len(state.joints_pos),
-            dtype=state.joints_pos.dtype,
-            device=state.joints_pos.device,
+            len(state.joints_vel),
+            dtype=state.joints_vel.dtype,
+            device=state.joints_vel.device,
         )
         * 10
     )
@@ -184,7 +184,7 @@ def test_aba(setup_test):
     h = adam_kin_dyn.bias_force(H, joints_pos, base_vel, joints_vel)
 
     generalized_external_wrenches = torch.zeros(
-        6 + len(joints_pos), dtype=H.dtype, device=H.device
+        6 + len(joints_vel), dtype=H.dtype, device=H.device
     )
     for frame, wrench in wrenches.items():
         J = adam_kin_dyn.jacobian(frame, H, joints_pos)
