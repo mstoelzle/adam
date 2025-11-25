@@ -224,20 +224,7 @@ def to_idyntree_model(model: Model) -> idyntree.bindings.Model:
                 parent_idx = links_map[j.parent]
                 child_idx = links_map[j.child]
 
-                # Create intermediate links
-                link_dummy = idyntree.bindings.Link()  # Massless, inertialsess
-                link_dummy.setInertia(idyntree.bindings.SpatialInertia.Zero())
-
-                link1_name = f"{j.name}_dummy_link1"
-                link2_name = f"{j.name}_dummy_link2"
-
-                link1_idx = output.addLink(link1_name, link_dummy)
-                link2_idx = output.addLink(link2_name, link_dummy)
-
-                # Joint 1: Roll (X)
-                joint1 = idyntree.bindings.RevoluteJoint()
-                joint1.setAttachedLinks(parent_idx, link1_idx)
-
+                # Create rest transform from joint origin
                 rest_position = idyntree.bindings.Position.FromPython(
                     _to_sequence(j.origin.xyz)
                 )
@@ -248,38 +235,15 @@ def to_idyntree_model(model: Model) -> idyntree.bindings.Model:
                 rest_transform.setRotation(rest_rotation)
                 rest_transform.setPosition(rest_position)
 
-                joint1.setRestTransform(rest_transform)
+                # Create SphericalJoint with rest transform
+                spherical_joint = idyntree.bindings.SphericalJoint(rest_transform)
+                spherical_joint.setAttachedLinks(parent_idx, child_idx)
 
-                axis1 = idyntree.bindings.Axis()
-                axis1.setDirection(idyntree.bindings.Direction(1, 0, 0))
-                axis1.setOrigin(idyntree.bindings.Position.Zero())
-                joint1.setAxis(axis1, link1_idx, parent_idx)
+                # Set the joint center at the joint origin (relative to parent link)
+                spherical_joint.setJointCenter(parent_idx, rest_position)
 
-                output.addJoint(f"{j.name}_roll", joint1)
-
-                # Joint 2: Pitch (Y)
-                joint2 = idyntree.bindings.RevoluteJoint()
-                joint2.setAttachedLinks(link1_idx, link2_idx)
-                joint2.setRestTransform(idyntree.bindings.Transform.Identity())
-
-                axis2 = idyntree.bindings.Axis()
-                axis2.setDirection(idyntree.bindings.Direction(0, 1, 0))
-                axis2.setOrigin(idyntree.bindings.Position.Zero())
-                joint2.setAxis(axis2, link2_idx, link1_idx)
-
-                output.addJoint(f"{j.name}_pitch", joint2)
-
-                # Joint 3: Yaw (Z)
-                joint3 = idyntree.bindings.RevoluteJoint()
-                joint3.setAttachedLinks(link2_idx, child_idx)
-                joint3.setRestTransform(idyntree.bindings.Transform.Identity())
-
-                axis3 = idyntree.bindings.Axis()
-                axis3.setDirection(idyntree.bindings.Direction(0, 0, 1))
-                axis3.setOrigin(idyntree.bindings.Position.Zero())
-                joint3.setAxis(axis3, child_idx, link2_idx)
-
-                output.addJoint(f"{j.name}_yaw", joint3)
+                joint_index = output.addJoint(j.name, spherical_joint)
+                assert output.isValidJointIndex(joint_index)
 
             else:
                 joint = to_idyntree_joint(j, links_map[j.parent], links_map[j.child])
@@ -308,14 +272,7 @@ def to_idyntree_model(model: Model) -> idyntree.bindings.Model:
             assert ok
 
     model_reducer = idyntree.bindings.ModelLoader()
-    actuated_joints = []
-    for j_name in model.actuated_joints:
-        if model.joints[j_name].type == "spherical":
-            actuated_joints.append(f"{j_name}_roll")
-            actuated_joints.append(f"{j_name}_pitch")
-            actuated_joints.append(f"{j_name}_yaw")
-        else:
-            actuated_joints.append(j_name)
+    actuated_joints = list(model.actuated_joints)
 
     model_reducer.loadReducedModelFromFullModel(output, actuated_joints)
     output_reduced = model_reducer.model().copy()

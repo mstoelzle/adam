@@ -49,6 +49,33 @@ def _rpy_to_matrix(rpy: torch.Tensor) -> torch.Tensor:
     return torch.stack([row0, row1, row2])
 
 
+def _rpy_to_quaternion(rpy: np.ndarray) -> np.ndarray:
+    """Convert ADAM's Euler angles (roll, pitch, yaw) to quaternion (w, x, y, z).
+    
+    ADAM uses XYZ convention: R = Rx(roll) * Ry(pitch) * Rz(yaw)
+    We compute the rotation matrix first, then convert to quaternion.
+    """
+    roll, pitch, yaw = rpy
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    
+    # R = Rx * Ry * Rz (ADAM's XYZ convention)
+    R = np.array([
+        [cp * cy, -cp * sy, sp],
+        [cr * sy + sr * sp * cy, cr * cy - sr * sp * sy, -sr * cp],
+        [sr * sy - cr * sp * cy, sr * cy + cr * sp * sy, cr * cp]
+    ])
+    
+    # Convert rotation matrix to quaternion using iDynTree
+    rot = idyntree.Rotation()
+    for i in range(3):
+        for j in range(3):
+            rot.setVal(i, j, float(R[i, j]))
+    q = rot.asQuaternion()
+    return np.array([q[0], q[1], q[2], q[3]])
+
+
 def _load_models(urdf_folder, device) -> Tuple[KinDynComputations, Any]:
     urdf_path = urdf_folder / "spherical_bot.urdf"
     urdf_path.write_text(URDF_SPHERICAL)
@@ -81,9 +108,11 @@ def test_forward_kinematics_spherical_joint(tmp_path, device):
 
     base_np = to_numpy(base)
     q_np = to_numpy(q)
+    # Convert Euler angles to quaternion for iDynTree SphericalJoint
+    q_quat = _rpy_to_quaternion(q_np)
     zero6 = np.zeros(6)
     zero3 = np.zeros(3)
-    idyn.setRobotState(base_np, q_np, zero6, zero3, np.array([0.0, 0.0, -9.80665]))
+    idyn.setRobotState(base_np, q_quat, zero6, zero3, np.array([0.0, 0.0, -9.80665]))
     idyn_fk = idyn.getRelativeTransform("base_link", "tip").asHomogeneousTransform().toNumPy()
     print("Adam FK:\n", to_numpy(fk))
     print("iDynTree FK:\n", idyn_fk)
@@ -173,9 +202,11 @@ def test_gravity_term_spherical_joint(tmp_path, device):
     # Compare with iDynTree
     base_np = to_numpy(base)
     q_np = to_numpy(q)
+    # Convert Euler angles to quaternion for iDynTree SphericalJoint
+    q_quat = _rpy_to_quaternion(q_np)
     zero6 = np.zeros(6)
     zero3 = np.zeros(3)
-    idyn.setRobotState(base_np, q_np, zero6, zero3, np.array([0.0, 0.0, -9.80665]))
+    idyn.setRobotState(base_np, q_quat, zero6, zero3, np.array([0.0, 0.0, -9.80665]))
     idyn_gravity = idyntree.FreeFloatingGeneralizedTorques(idyn.model())
     print("idyn_gravity:", idyn_gravity)
     idyn.generalizedGravityForces(idyn_gravity)
