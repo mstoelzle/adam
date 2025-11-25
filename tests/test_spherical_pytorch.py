@@ -170,7 +170,7 @@ def test_jacobian_spherical_joint(tmp_path, device):
 
 
 def test_jacobian_dot_spherical_joint(tmp_path, device):
-    kdc, _ = _load_models(tmp_path, device)
+    kdc, idyn = _load_models(tmp_path, device)
 
     base = torch.eye(4, device=device, dtype=torch.float64)
     # Use Euler angles to create quaternion for testing
@@ -186,6 +186,20 @@ def test_jacobian_dot_spherical_joint(tmp_path, device):
     jacobian_dot = kdc.jacobian_dot("tip", base, q, base_vel, q_dot)
     jacobian_dot_times_v = jacobian_dot @ torch.concatenate([base_vel, q_dot])
     assert torch.all(torch.isfinite(jacobian_dot_times_v))
+
+    # Compare with iDynTree
+    base_np = to_numpy(base)
+    base_vel_np = to_numpy(base_vel)
+    q_dot_np = to_numpy(q_dot)
+    idyn.setRobotState(
+        base_np, q_quat_np, base_vel_np, q_dot_np, np.array([0.0, 0.0, -9.80665])
+    )
+    idyn_jacobian_dot_nu = idyn.getFrameBiasAcc("tip").toNumPy()
+    print("Adam Jacobian dot * nu:\n", to_numpy(jacobian_dot_times_v))
+    print("iDynTree Jacobian dot * nu:\n", idyn_jacobian_dot_nu)
+    assert idyn_jacobian_dot_nu - to_numpy(jacobian_dot_times_v) == pytest.approx(
+        0.0, abs=1e-5
+    )
 
 
 def test_mass_matrix_spherical_joint(tmp_path, device):
