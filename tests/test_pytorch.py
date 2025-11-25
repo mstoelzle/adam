@@ -7,8 +7,8 @@ from adam.pytorch import KinDynComputations
 
 
 @pytest.fixture(scope="module")
-def setup_test(tests_setup, device) -> KinDynComputations | RobotCfg | State:
-    robot_cfg, state = tests_setup
+def setup_test(tests_setup_with_spherical, device) -> KinDynComputations | RobotCfg | State:
+    robot_cfg, state = tests_setup_with_spherical
     adam_kin_dyn = KinDynComputations(
         robot_cfg.model_path,
         robot_cfg.joints_name_list,
@@ -67,14 +67,18 @@ def test_total_mass(setup_test):
 def test_jacobian(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_jacobian = robot_cfg.idyn_function_values.jacobian
-    adam_jacobian = adam_kin_dyn.jacobian("l_sole", state.H, state.joints_pos)
+    adam_jacobian = adam_kin_dyn.jacobian(
+        robot_cfg.frame, state.H, state.joints_pos
+    )
     assert to_numpy(adam_jacobian) - idyn_jacobian == pytest.approx(0.0, abs=1e-5)
 
 
 def test_jacobian_non_actuated(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_jacobian = robot_cfg.idyn_function_values.jacobian_non_actuated
-    adam_jacobian = adam_kin_dyn.jacobian("head", state.H, state.joints_pos)
+    adam_jacobian = adam_kin_dyn.jacobian(
+        robot_cfg.frame_non_actuated, state.H, state.joints_pos
+    )
     assert to_numpy(adam_jacobian) - idyn_jacobian == pytest.approx(0.0, abs=1e-5)
 
 
@@ -82,7 +86,7 @@ def test_jacobian_dot(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_jacobian_dot_nu = robot_cfg.idyn_function_values.jacobian_dot_nu
     adam_jacobian_dot_nu = adam_kin_dyn.jacobian_dot(
-        "l_sole", state.H, state.joints_pos, state.base_vel, state.joints_vel
+        robot_cfg.frame, state.H, state.joints_pos, state.base_vel, state.joints_vel
     ) @ torch.concatenate((state.base_vel, state.joints_vel), axis=0)
     assert idyn_jacobian_dot_nu - to_numpy(adam_jacobian_dot_nu) == pytest.approx(
         0.0, abs=1e-5
@@ -92,21 +96,27 @@ def test_jacobian_dot(setup_test):
 def test_relative_jacobian(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_jacobian = robot_cfg.idyn_function_values.relative_jacobian
-    adam_jacobian = adam_kin_dyn.relative_jacobian("l_sole", state.joints_pos)
+    adam_jacobian = adam_kin_dyn.relative_jacobian(
+        robot_cfg.frame, state.joints_pos
+    )
     assert idyn_jacobian - to_numpy(adam_jacobian) == pytest.approx(0.0, abs=1e-5)
 
 
 def test_fk(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_H = robot_cfg.idyn_function_values.forward_kinematics
-    adam_H = adam_kin_dyn.forward_kinematics("l_sole", state.H, state.joints_pos)
+    adam_H = adam_kin_dyn.forward_kinematics(
+        robot_cfg.frame, state.H, state.joints_pos
+    )
     assert idyn_H - to_numpy(adam_H) == pytest.approx(0.0, abs=1e-5)
 
 
 def test_fk_non_actuated(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_H = robot_cfg.idyn_function_values.forward_kinematics_non_actuated
-    adam_H = adam_kin_dyn.forward_kinematics("head", state.H, state.joints_pos)
+    adam_H = adam_kin_dyn.forward_kinematics(
+        robot_cfg.frame_non_actuated, state.H, state.joints_pos
+    )
     assert idyn_H - to_numpy(adam_H) == pytest.approx(0.0, abs=1e-5)
 
 
@@ -151,15 +161,11 @@ def test_aba(setup_test):
     joints_vel = state.joints_vel
 
     wrenches = {
-        "l_sole": torch.randn(
+        robot_cfg.frame: torch.randn(
             6, dtype=state.joints_pos.dtype, device=state.joints_pos.device
         )
         * 10,
-        "torso_1": torch.randn(
-            6, dtype=state.joints_pos.dtype, device=state.joints_pos.device
-        )
-        * 10,
-        "head": torch.randn(
+        robot_cfg.frame_non_actuated: torch.randn(
             6, dtype=state.joints_pos.dtype, device=state.joints_pos.device
         )
         * 10,
