@@ -250,3 +250,7 @@ class ArrayAPISpatialMath(SpatialMath):
     def solve(self, A: ArrayAPILike, B: ArrayAPILike) -> ArrayAPILike:
         xp = self._xp(A.array, B.array)
         return self.factory.asarray(xp.linalg.solve(A.array, B.array))
+
+    def sqrt(self, x):
+        xp = self._xp(x.array)
+        return self.factory.asarray(xp.sqrt(x.array))

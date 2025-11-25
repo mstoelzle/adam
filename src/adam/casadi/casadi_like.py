@@ -198,6 +198,10 @@ class SpatialMath(_SpatialMath):
         return CasadiLike(cs.cos(x.array))
 
     @staticmethod
+    def sqrt(x: CasadiLike) -> CasadiLike:
+        return CasadiLike(cs.sqrt(x.array))
+
+    @staticmethod
     def skew(x: Union[CasadiLike, npt.ArrayLike]) -> CasadiLike:
         a = x.array if isinstance(x, CasadiLike) else x
         # Expect 3-vector; if it's a row, transpose; if scalar/empty, raise.
