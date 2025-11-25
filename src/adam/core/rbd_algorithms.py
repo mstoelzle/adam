@@ -230,7 +230,7 @@ class RBDAlgorithms:
             node_idx = joint_to_node.get(jidx)
             if node_idx is not None:
                 local_indices = self._expand_joint_indices(
-                    joint_indices[node_idx]
+                    vel_joint_indices[node_idx]
                 )
                 local_pos = local_indices.index(jidx)
                 F_node = math.mtimes(Ic_comp[node_idx], Phi[node_idx])
