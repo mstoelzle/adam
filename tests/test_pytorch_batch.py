@@ -2,14 +2,23 @@ import numpy as np
 import pytest
 import torch
 from scipy.spatial.transform import Rotation as R
-from conftest import RobotCfg, State, compute_idyntree_values, to_numpy
+from conftest import (
+    RobotCfg,
+    State,
+    compute_idyntree_values,
+    generate_random_quaternion,
+    is_spherical_robot,
+    to_numpy,
+)
 
 from adam.pytorch import KinDynComputationsBatch
 
 
 @pytest.fixture(scope="module")
-def setup_test(tests_setup, device) -> KinDynComputationsBatch | RobotCfg | State:
-    robot_cfg, state = tests_setup
+def setup_test(
+    tests_setup_with_spherical, device
+) -> KinDynComputationsBatch | RobotCfg | State:
+    robot_cfg, state = tests_setup_with_spherical
 
     adam_kin_dyn = KinDynComputationsBatch(
         robot_cfg.model_path,
@@ -29,13 +38,22 @@ def setup_test(tests_setup, device) -> KinDynComputationsBatch | RobotCfg | Stat
     H[:, :3, :3] = rotation_matrices
     H[:, :3, 3] = base_positions
     H[:, 3, 3] = 1
+    position_dim = state.joints_pos.shape[-1]
+    velocity_dim = state.joints_vel.shape[-1]
+    n_joints = len(robot_cfg.joints_name_list)
 
-    # Generate random joint positions (within reasonable bounds)
-    joint_positions = np.random.randn(batch_size, robot_cfg.n_dof)
+    # Generate random joint positions (respect quaternion layout for spherical joints)
+    if is_spherical_robot(robot_cfg.robot_name):
+        joint_positions = np.zeros((batch_size, position_dim))
+        for b in range(batch_size):
+            for j in range(n_joints):
+                joint_positions[b, j * 4 : (j + 1) * 4] = generate_random_quaternion()
+    else:
+        joint_positions = np.random.randn(batch_size, position_dim)
 
     # Generate random velocities
     base_vel = np.random.randn(batch_size, 6)
-    joints_vel = np.random.randn(batch_size, robot_cfg.n_dof)
+    joints_vel = np.random.randn(batch_size, velocity_dim)
 
     # Convert to torch tensors
     state.H = torch.as_tensor(H, dtype=torch.float64).to(device).requires_grad_()
@@ -56,7 +74,7 @@ def setup_test(tests_setup, device) -> KinDynComputationsBatch | RobotCfg | Stat
     state.joints_pos_numpy = joint_positions
     state.base_vel_numpy = base_vel
     state.joints_vel_numpy = joints_vel
-    state.gravity_numpy = np.array([0.0, 0.0, -9.80665])
+    state.gravity_numpy = np.array(state.gravity, dtype=np.float64)
 
     return adam_kin_dyn, robot_cfg, state, batch_size
 
@@ -64,6 +82,7 @@ def setup_test(tests_setup, device) -> KinDynComputationsBatch | RobotCfg | Stat
 def compute_idyntree_batch_reference(robot_cfg, state, batch_size, operation_name):
     """Compute idyntree reference values for each element in the batch"""
     references = []
+    frames = {"frame": robot_cfg.frame, "frame_non_actuated": robot_cfg.frame_non_actuated}
 
     for b in range(batch_size):
         # Create state for this batch element
@@ -76,7 +95,7 @@ def compute_idyntree_batch_reference(robot_cfg, state, batch_size, operation_nam
         )
 
         # Compute idyntree values for this state
-        idyn_values = compute_idyntree_values(robot_cfg.kin_dyn, batch_state)
+        idyn_values = compute_idyntree_values(robot_cfg.kin_dyn, batch_state, frames)
 
         # Extract the specific operation result
         if operation_name == "mass_matrix":
@@ -265,7 +284,9 @@ def test_jacobian(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
 
     # Compute batched jacobian
-    adam_jacobian = adam_kin_dyn.jacobian("l_sole", state.H, state.joints_pos)
+    adam_jacobian = adam_kin_dyn.jacobian(
+        robot_cfg.frame, state.H, state.joints_pos
+    )
 
     # Test gradient computation
     try:
@@ -292,7 +313,9 @@ def test_jacobian(setup_test):
 
 def test_jacobian_non_actuated(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
-    adam_jacobian = adam_kin_dyn.jacobian("head", state.H, state.joints_pos)
+    adam_jacobian = adam_kin_dyn.jacobian(
+        robot_cfg.frame_non_actuated, state.H, state.joints_pos
+    )
     try:
         adam_jacobian.sum().backward()
     except:
@@ -321,7 +344,7 @@ def test_jacobian_dot(setup_test):
 
     # Compute jacobian_dot_nu using matrix multiplication like in numpy tests
     adam_jacobian_dot = adam_kin_dyn.jacobian_dot(
-        "l_sole", state.H, state.joints_pos, state.base_vel, state.joints_vel
+        robot_cfg.frame, state.H, state.joints_pos, state.base_vel, state.joints_vel
     )
 
     # Compute jacobian_dot_nu by multiplying with velocities
@@ -359,7 +382,9 @@ def test_jacobian_dot(setup_test):
 
 def test_relative_jacobian(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
-    adam_jacobian = adam_kin_dyn.relative_jacobian("l_sole", state.joints_pos)
+    adam_jacobian = adam_kin_dyn.relative_jacobian(
+        robot_cfg.frame, state.joints_pos
+    )
     try:
         adam_jacobian.sum().backward()
     except:
@@ -385,7 +410,9 @@ def test_relative_jacobian(setup_test):
 
 def test_fk(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
-    adam_H = adam_kin_dyn.forward_kinematics("l_sole", state.H, state.joints_pos)
+    adam_H = adam_kin_dyn.forward_kinematics(
+        robot_cfg.frame, state.H, state.joints_pos
+    )
     try:
         adam_H.sum().backward()
     except:
@@ -411,7 +438,9 @@ def test_fk(setup_test):
 
 def test_fk_non_actuated(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
-    adam_H = adam_kin_dyn.forward_kinematics("head", state.H, state.joints_pos)
+    adam_H = adam_kin_dyn.forward_kinematics(
+        robot_cfg.frame_non_actuated, state.H, state.joints_pos
+    )
     try:
         adam_H.sum().backward()
     except:
@@ -531,10 +560,10 @@ def test_aba(setup_test):
     # Create random torques for the batch
     torques = torch.randn(batch_size, n_joints, device=device, dtype=torch.float64) * 10
     # Create random wrenches for multiple frames
+    wrench_frames = [robot_cfg.frame, robot_cfg.frame_non_actuated]
     wrenches = {
-        "l_sole": torch.randn(batch_size, 6, device=device, dtype=torch.float64) * 10,
-        "torso_1": torch.randn(batch_size, 6, device=device, dtype=torch.float64) * 10,
-        "head": torch.randn(batch_size, 6, device=device, dtype=torch.float64) * 10,
+        frame: torch.randn(batch_size, 6, device=device, dtype=torch.float64) * 10
+        for frame in wrench_frames
     }
 
     # Compute ABA

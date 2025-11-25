@@ -3,7 +3,13 @@ import pytest
 import jax.numpy as jnp
 from jax import grad, jacfwd, config
 from scipy.spatial.transform import Rotation as R
-from conftest import RobotCfg, State, compute_idyntree_values
+from conftest import (
+    RobotCfg,
+    State,
+    compute_idyntree_values,
+    generate_random_quaternion,
+    is_spherical_robot,
+)
 from adam.jax import KinDynComputations
 
 # Enable 64-bit precision for better numerical accuracy
@@ -11,8 +17,8 @@ config.update("jax_enable_x64", True)
 
 
 @pytest.fixture(scope="module")
-def setup_test(tests_setup) -> tuple[KinDynComputations, RobotCfg, State, int]:
-    robot_cfg, state = tests_setup
+def setup_test(tests_setup_with_spherical) -> tuple[KinDynComputations, RobotCfg, State, int]:
+    robot_cfg, state = tests_setup_with_spherical
 
     adam_kin_dyn = KinDynComputations(robot_cfg.model_path, robot_cfg.joints_name_list)
     adam_kin_dyn.set_frame_velocity_representation(robot_cfg.velocity_representation)
@@ -27,13 +33,22 @@ def setup_test(tests_setup) -> tuple[KinDynComputations, RobotCfg, State, int]:
     H[:, :3, :3] = rotation_matrices
     H[:, :3, 3] = base_positions
     H[:, 3, 3] = 1
+    position_dim = state.joints_pos.shape[-1]
+    velocity_dim = state.joints_vel.shape[-1]
+    n_joints = len(robot_cfg.joints_name_list)
 
-    # Generate random joint positions (within reasonable bounds)
-    joint_positions = np.random.randn(batch_size, robot_cfg.n_dof)
+    # Generate random joint positions (respect quaternion layout for spherical joints)
+    if is_spherical_robot(robot_cfg.robot_name):
+        joint_positions = np.zeros((batch_size, position_dim))
+        for b in range(batch_size):
+            for j in range(n_joints):
+                joint_positions[b, j * 4 : (j + 1) * 4] = generate_random_quaternion()
+    else:
+        joint_positions = np.random.randn(batch_size, position_dim)
 
     # Generate random velocities
     base_vel = np.random.randn(batch_size, 6)
-    joints_vel = np.random.randn(batch_size, robot_cfg.n_dof)
+    joints_vel = np.random.randn(batch_size, velocity_dim)
 
     # Convert to JAX arrays (no requires_grad like PyTorch)
     state.H = jnp.array(H, dtype=jnp.float64)
@@ -46,7 +61,7 @@ def setup_test(tests_setup) -> tuple[KinDynComputations, RobotCfg, State, int]:
     state.joints_pos_numpy = joint_positions
     state.base_vel_numpy = base_vel
     state.joints_vel_numpy = joints_vel
-    state.gravity_numpy = np.array([0.0, 0.0, -9.80665])
+    state.gravity_numpy = np.array(state.gravity, dtype=np.float64)
 
     return adam_kin_dyn, robot_cfg, state, batch_size
 
@@ -54,6 +69,7 @@ def setup_test(tests_setup) -> tuple[KinDynComputations, RobotCfg, State, int]:
 def compute_idyntree_batch_reference(robot_cfg, state, batch_size, operation_name):
     """Compute idyntree reference values for each element in the batch"""
     references = []
+    frames = {"frame": robot_cfg.frame, "frame_non_actuated": robot_cfg.frame_non_actuated}
 
     for b in range(batch_size):
         # Create state for this batch element
@@ -66,7 +82,7 @@ def compute_idyntree_batch_reference(robot_cfg, state, batch_size, operation_nam
         )
 
         # Compute idyntree values for this state
-        idyn_values = compute_idyntree_values(robot_cfg.kin_dyn, batch_state)
+        idyn_values = compute_idyntree_values(robot_cfg.kin_dyn, batch_state, frames)
 
         # Extract the specific operation result
         if operation_name == "mass_matrix":
@@ -285,11 +301,13 @@ def test_CoM_jacobian(setup_test):
 def test_jacobian(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
 
-    adam_jacobian = adam_kin_dyn.jacobian("l_sole", state.H, state.joints_pos)
+    adam_jacobian = adam_kin_dyn.jacobian(
+        robot_cfg.frame, state.H, state.joints_pos
+    )
 
     # Test gradient computation
     def jacobian_sum(H, joints_pos):
-        return adam_kin_dyn.jacobian("l_sole", H, joints_pos).sum()
+        return adam_kin_dyn.jacobian(robot_cfg.frame, H, joints_pos).sum()
 
     grad_fn = grad(jacobian_sum, argnums=(0, 1))
     try:
@@ -318,11 +336,15 @@ def test_jacobian(setup_test):
 def test_jacobian_non_actuated(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
 
-    adam_jacobian = adam_kin_dyn.jacobian("head", state.H, state.joints_pos)
+    adam_jacobian = adam_kin_dyn.jacobian(
+        robot_cfg.frame_non_actuated, state.H, state.joints_pos
+    )
 
     # Test gradient computation
     def jacobian_sum(H, joints_pos):
-        return adam_kin_dyn.jacobian("head", H, joints_pos).sum()
+        return adam_kin_dyn.jacobian(
+            robot_cfg.frame_non_actuated, H, joints_pos
+        ).sum()
 
     grad_fn = grad(jacobian_sum, argnums=(0, 1))
     try:
@@ -355,7 +377,7 @@ def test_jacobian_dot(setup_test):
 
     # Compute jacobian_dot_nu using matrix multiplication like in PyTorch tests
     adam_jacobian_dot = adam_kin_dyn.jacobian_dot(
-        "l_sole", state.H, state.joints_pos, state.base_vel, state.joints_vel
+        robot_cfg.frame, state.H, state.joints_pos, state.base_vel, state.joints_vel
     )
 
     # Compute jacobian_dot_nu by multiplying with velocities
@@ -368,7 +390,7 @@ def test_jacobian_dot(setup_test):
     # Test gradient computation
     def jacobian_dot_nu_sum(H, joints_pos, base_vel, joints_vel):
         jac_dot = adam_kin_dyn.jacobian_dot(
-            "l_sole", H, joints_pos, base_vel, joints_vel
+            robot_cfg.frame, H, joints_pos, base_vel, joints_vel
         )
         vels = jnp.concatenate([base_vel, joints_vel], axis=1)
         return (jac_dot @ vels[..., jnp.newaxis]).squeeze(-1).sum()
@@ -405,11 +427,15 @@ def test_jacobian_dot(setup_test):
 def test_relative_jacobian(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
 
-    adam_jacobian = adam_kin_dyn.relative_jacobian("l_sole", state.joints_pos)
+    adam_jacobian = adam_kin_dyn.relative_jacobian(
+        robot_cfg.frame, state.joints_pos
+    )
 
     # Test gradient computation
     def rel_jac_sum(joints_pos):
-        return adam_kin_dyn.relative_jacobian("l_sole", joints_pos).sum()
+        return adam_kin_dyn.relative_jacobian(
+            robot_cfg.frame, joints_pos
+        ).sum()
 
     grad_fn = grad(rel_jac_sum)
     try:
@@ -440,11 +466,15 @@ def test_relative_jacobian(setup_test):
 def test_fk(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
 
-    adam_H = adam_kin_dyn.forward_kinematics("l_sole", state.H, state.joints_pos)
+    adam_H = adam_kin_dyn.forward_kinematics(
+        robot_cfg.frame, state.H, state.joints_pos
+    )
 
     # Test gradient computation
     def fk_sum(H, joints_pos):
-        return adam_kin_dyn.forward_kinematics("l_sole", H, joints_pos).sum()
+        return adam_kin_dyn.forward_kinematics(
+            robot_cfg.frame, H, joints_pos
+        ).sum()
 
     grad_fn = grad(fk_sum, argnums=(0, 1))
     try:
@@ -475,11 +505,15 @@ def test_fk(setup_test):
 def test_fk_non_actuated(setup_test):
     adam_kin_dyn, robot_cfg, state, batch_size = setup_test
 
-    adam_H = adam_kin_dyn.forward_kinematics("head", state.H, state.joints_pos)
+    adam_H = adam_kin_dyn.forward_kinematics(
+        robot_cfg.frame_non_actuated, state.H, state.joints_pos
+    )
 
     # Test gradient computation
     def fk_sum(H, joints_pos):
-        return adam_kin_dyn.forward_kinematics("head", H, joints_pos).sum()
+        return adam_kin_dyn.forward_kinematics(
+            robot_cfg.frame_non_actuated, H, joints_pos
+        ).sum()
 
     grad_fn = grad(fk_sum, argnums=(0, 1))
     try:
@@ -627,10 +661,9 @@ def test_aba(setup_test):
     torques = jnp.array(np.random.randn(batch_size, n_joints) * 10)
 
     # Create random wrenches for multiple frames
+    wrench_frames = [robot_cfg.frame, robot_cfg.frame_non_actuated]
     wrenches = {
-        "l_sole": jnp.array(np.random.randn(batch_size, 6) * 10),
-        "torso_1": jnp.array(np.random.randn(batch_size, 6) * 10),
-        "head": jnp.array(np.random.randn(batch_size, 6) * 10),
+        frame: jnp.array(np.random.randn(batch_size, 6) * 10) for frame in wrench_frames
     }
 
     # Compute ABA

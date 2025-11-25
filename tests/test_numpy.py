@@ -6,8 +6,8 @@ from adam.numpy import KinDynComputations
 
 
 @pytest.fixture(scope="module")
-def setup_test(tests_setup) -> KinDynComputations | RobotCfg | State:
-    robot_cfg, state = tests_setup
+def setup_test(tests_setup_with_spherical) -> KinDynComputations | RobotCfg | State:
+    robot_cfg, state = tests_setup_with_spherical
     adam_kin_dyn = KinDynComputations(robot_cfg.model_path, robot_cfg.joints_name_list)
     adam_kin_dyn.set_frame_velocity_representation(robot_cfg.velocity_representation)
     return adam_kin_dyn, robot_cfg, state
@@ -52,14 +52,14 @@ def test_total_mass(setup_test):
 def test_jacobian(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_jacobian = robot_cfg.idyn_function_values.jacobian
-    adam_jacobian = adam_kin_dyn.jacobian("l_sole", state.H, state.joints_pos)
+    adam_jacobian = adam_kin_dyn.jacobian(robot_cfg.frame, state.H, state.joints_pos)
     assert adam_jacobian - idyn_jacobian == pytest.approx(0.0, abs=1e-5)
 
 
 def test_jacobian_non_actuated(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_jacobian = robot_cfg.idyn_function_values.jacobian_non_actuated
-    adam_jacobian = adam_kin_dyn.jacobian("head", state.H, state.joints_pos)
+    adam_jacobian = adam_kin_dyn.jacobian(robot_cfg.frame_non_actuated, state.H, state.joints_pos)
     assert adam_jacobian - idyn_jacobian == pytest.approx(0.0, abs=1e-5)
 
 
@@ -67,7 +67,7 @@ def test_jacobian_dot(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_jacobian_dot_nu = robot_cfg.idyn_function_values.jacobian_dot_nu
     adam_jacobian_dot_nu = adam_kin_dyn.jacobian_dot(
-        "l_sole", state.H, state.joints_pos, state.base_vel, state.joints_vel
+        robot_cfg.frame, state.H, state.joints_pos, state.base_vel, state.joints_vel
     ) @ np.concatenate((state.base_vel, state.joints_vel))
     assert idyn_jacobian_dot_nu - adam_jacobian_dot_nu == pytest.approx(0.0, abs=1e-5)
 
@@ -75,21 +75,21 @@ def test_jacobian_dot(setup_test):
 def test_relative_jacobian(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_jacobian = robot_cfg.idyn_function_values.relative_jacobian
-    adam_jacobian = adam_kin_dyn.relative_jacobian("l_sole", state.joints_pos)
+    adam_jacobian = adam_kin_dyn.relative_jacobian(robot_cfg.frame, state.joints_pos)
     assert idyn_jacobian - adam_jacobian == pytest.approx(0.0, abs=1e-5)
 
 
 def test_fk(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_H = robot_cfg.idyn_function_values.forward_kinematics
-    adam_H = adam_kin_dyn.forward_kinematics("l_sole", state.H, state.joints_pos)
+    adam_H = adam_kin_dyn.forward_kinematics(robot_cfg.frame, state.H, state.joints_pos)
     assert idyn_H - adam_H == pytest.approx(0.0, abs=1e-5)
 
 
 def test_fk_non_actuated(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
     idyn_H = robot_cfg.idyn_function_values.forward_kinematics_non_actuated
-    adam_H = adam_kin_dyn.forward_kinematics("head", state.H, state.joints_pos)
+    adam_H = adam_kin_dyn.forward_kinematics(robot_cfg.frame_non_actuated, state.H, state.joints_pos)
     assert idyn_H - adam_H == pytest.approx(0.0, abs=1e-5)
 
 
@@ -120,16 +120,15 @@ def test_gravity_term(setup_test):
 
 def test_aba(setup_test):
     adam_kin_dyn, robot_cfg, state = setup_test
-    torques = np.random.randn(len(state.joints_pos)) * 10
+    torques = np.random.randn(len(state.joints_vel)) * 10
     H = state.H
     joints_pos = state.joints_pos
     base_vel = state.base_vel
     joints_vel = state.joints_vel
 
     wrenches = {
-        "l_sole": np.random.randn(6) * 10,
-        "torso_1": np.random.randn(6) * 10,
-        "head": np.random.randn(6) * 10,
+        robot_cfg.frame: np.random.randn(6) * 10,
+        robot_cfg.frame_non_actuated: np.random.randn(6) * 10,
     }
 
     adam_qdd = adam_kin_dyn.aba(
@@ -144,7 +143,7 @@ def test_aba(setup_test):
     M = adam_kin_dyn.mass_matrix(H, joints_pos)
     h = adam_kin_dyn.bias_force(H, joints_pos, base_vel, joints_vel)
 
-    generalized_external_wrenches = np.zeros(6 + len(joints_pos))
+    generalized_external_wrenches = np.zeros(6 + len(joints_vel))
     for frame, wrench in wrenches.items():
         J = adam_kin_dyn.jacobian(frame, H, joints_pos)
         generalized_external_wrenches += J.T @ wrench
