@@ -91,7 +91,8 @@ class Joint(abc.ABC):
     axis: npt.ArrayLike
     origin: Pose
     limit: Limits
-    idx: int
+    idx: int | tuple[int, ...] | None = None
+    dofs: int = 1
     """
     Abstract base class for all joints.
     """
@@ -108,11 +109,21 @@ class Joint(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def motion_subspace(self) -> npt.ArrayLike:
+    def motion_subspace(self, q: npt.ArrayLike | None = None) -> npt.ArrayLike:
         """
         Returns:
             npt.ArrayLike: motion subspace of the joint
         """
+
+    @abc.abstractmethod
+    def motion_subspace_dot(
+        self, q: npt.ArrayLike, q_dot: npt.ArrayLike
+    ) -> npt.ArrayLike:
+        """
+        Returns:
+            npt.ArrayLike: time derivative of the motion subspace of the joint
+        """
+        pass
 
     @abc.abstractmethod
     def homogeneous(self, q: npt.ArrayLike) -> npt.ArrayLike:

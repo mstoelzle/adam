@@ -401,6 +401,45 @@ class SpatialMath:
         R = R_rpy @ R_axis
         return self.homogeneous(R, xyz)
 
+    def H_spherical_joint(
+        self, xyz: npt.ArrayLike, rpy: npt.ArrayLike, q: npt.ArrayLike
+    ) -> npt.ArrayLike:
+        """
+        Args:
+            xyz (npt.ArrayLike): joint origin in the urdf
+            rpy (npt.ArrayLike): joint orientation in the urdf
+            q (npt.ArrayLike): joint angles [roll, pitch, yaw]
+
+        Returns:
+            npt.ArrayLike: Homogeneous transform
+        """
+        if q.shape[-1] != 3:
+            raise ValueError(
+                f"Spherical joints expect 3 DoFs, received shape {q.shape}"
+            )
+
+        if q.ndim > 1:
+            batch_shape = q.shape[:-1]
+            xp = self._xp(q.array)
+            if xyz.ndim == 1:
+                xyz = self.factory.asarray(
+                    xp.broadcast_to(xyz.array, batch_shape + xyz.array.shape)
+                )
+            if rpy.ndim == 1:
+                rpy = self.factory.asarray(
+                    xp.broadcast_to(rpy.array, batch_shape + rpy.array.shape)
+                )
+
+        R_rpy = self.R_from_RPY(rpy)
+        # The spherical joint is implemented as a sequence of 3 revolute joints:
+        # 1. Roll (around X)
+        # 2. Pitch (around Y)
+        # 3. Yaw (around Z)
+        # This corresponds to the rotation matrix R = Rx(q[0]) @ Ry(q[1]) @ Rz(q[2])
+        R_rel = self.Rx(q[..., 0]) @ self.Ry(q[..., 1]) @ self.Rz(q[..., 2])
+        R = R_rpy @ R_rel
+        return self.homogeneous(R, xyz)
+
     def homogeneous(self, R, p):
         # Ensure p has the right shape for concatenation
         if p.ndim == R.ndim - 1:
@@ -497,6 +536,23 @@ class SpatialMath:
         T = self.H_prismatic_joint(xyz, rpy, axis, q)
         R = T[:3, :3].T
         p = -T[:3, :3].T @ T[:3, 3]
+        return self.spatial_transform(R, p)
+
+    def X_spherical_joint(
+        self, xyz: npt.ArrayLike, rpy: npt.ArrayLike, q: npt.ArrayLike
+    ) -> npt.ArrayLike:
+        """
+        Args:
+            xyz (npt.ArrayLike): joint origin in the urdf
+            rpy (npt.ArrayLike): joint orientation in the urdf
+            q (npt.ArrayLike): joint angles [roll, pitch, yaw]
+
+        Returns:
+            npt.ArrayLike: Spatial transform of a spherical joint
+        """
+        T = self.H_spherical_joint(xyz, rpy, q)
+        R = self.swapaxes(T[..., :3, :3], -1, -2)
+        p = self.mxv(-R, T[..., :3, 3])
         return self.spatial_transform(R, p)
 
     def X_fixed_joint(self, xyz: npt.ArrayLike, rpy: npt.ArrayLike) -> npt.ArrayLike:

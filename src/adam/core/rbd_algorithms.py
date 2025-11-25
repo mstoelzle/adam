@@ -62,11 +62,11 @@ class RBDAlgorithms:
         rev_indices = self._rev_node_indices
         parent_indices = self._parent_indices
         joint_indices = self._joint_indices_per_node
-        motion_subspaces = self._motion_subspaces
         inertias = self._spatial_inertias
         joints = self._joints_per_node
         root_idx = self._root_index
         joint_to_node = self._joint_index_to_node
+        joint_dofs = self._dofs_per_node
 
         if len(joint_positions.shape) >= 2:
             batch_shape = joint_positions.shape[:-1]
@@ -76,9 +76,16 @@ class RBDAlgorithms:
             batch_shape = ()
 
         if joint_positions.shape[-1] > 0:
-            zero_q = math.zeros_like(joint_positions[..., 0])
+            zero_scalar = math.zeros_like(joint_positions[..., 0])
         else:
-            zero_q = math.zeros_like(base_transform[..., 0, 0])
+            zero_scalar = math.zeros_like(base_transform[..., 0, 0])
+
+        def zeros_for_dofs(count: int):
+            if count == 0:
+                return math.factory.zeros(batch_shape + ())
+            if count == 1:
+                return zero_scalar
+            return math.factory.zeros(batch_shape + (count,))
 
         def tile_batch(arr):
             if not batch_shape:
@@ -98,8 +105,11 @@ class RBDAlgorithms:
             else:
                 joint = joints[idx]
                 joint_idx = joint_indices[idx]
+                dof_count = joint_dofs[idx]
                 q_i = (
-                    joint_positions[..., joint_idx] if joint_idx is not None else zero_q
+                    joint_positions[..., joint_idx]
+                    if joint_idx is not None
+                    else zeros_for_dofs(dof_count)
                 )
                 X_current = (
                     joint.spatial_transform(q=q_i)
@@ -107,7 +117,12 @@ class RBDAlgorithms:
                     else self._root_spatial_transform
                 )
                 Xup[idx] = X_current
-                Phi[idx] = tile_batch(motion_subspaces[idx])
+                S_i = (
+                    joint.motion_subspace(q_i)
+                    if joint is not None
+                    else self._root_motion_subspace
+                )
+                Phi[idx] = tile_batch(S_i)
 
         Xup_T = [math.swapaxes(Xup[i], -2, -1) for i in range(node_count)]
         Ic_comp = Ic[:]
@@ -120,14 +135,6 @@ class RBDAlgorithms:
                     Xup[idx],
                 )
 
-        def block_index(node_idx: int) -> int | None:
-            if node_idx == root_idx:
-                return 0
-            joint_idx = joint_indices[node_idx]
-            if joint_idx is None:
-                return None
-            return 1 + int(joint_idx)
-
         sizes = [6] + [1] * n
         blocks: list[list[npt.ArrayLike | None]] = [
             [None for _ in range(n + 1)] for _ in range(n + 1)
@@ -137,30 +144,50 @@ class RBDAlgorithms:
             Phi_i = Phi[idx]
             Phi_T = math.swapaxes(Phi_i, -2, -1)
             F = math.mtimes(Ic_comp[idx], Phi_i)
-            ri = block_index(idx)
+            dof_indices_i = self._expand_joint_indices(joint_indices[idx])
 
             if idx == root_idx:
                 blocks[0][0] = math.mtimes(Phi_T, F)
                 continue
 
-            if ri is not None:
-                blocks[ri][ri] = math.mtimes(Phi_T, F)
+            if dof_indices_i:
+                PhiTF = math.mtimes(Phi_T, F)
+                for local_r, dof_r in enumerate(dof_indices_i):
+                    for local_c, dof_c in enumerate(dof_indices_i):
+                        blocks[1 + dof_r][1 + dof_c] = PhiTF[
+                            ..., local_r : local_r + 1, local_c : local_c + 1
+                        ]
 
             current = idx
             F_path = F
             while current != root_idx:
                 parent = parent_indices[current]
                 F_path = math.mtimes(Xup_T[current], F_path)
-                rj = block_index(parent)
-                if rj is None:
-                    current = parent
-                    continue
                 Bij = math.mtimes(math.swapaxes(F_path, -2, -1), Phi[parent])
-                if ri is None:
+                if not dof_indices_i:
                     current = parent
                     continue
-                blocks[ri][rj] = Bij
-                blocks[rj][ri] = math.swapaxes(Bij, -2, -1)
+                if parent == root_idx:
+                    for local_r, dof_r in enumerate(dof_indices_i):
+                        row_block = Bij[..., local_r : local_r + 1, :]
+                        blocks[1 + dof_r][0] = row_block
+                        blocks[0][1 + dof_r] = math.swapaxes(row_block, -2, -1)
+                else:
+                    dof_indices_parent = self._expand_joint_indices(
+                        joint_indices[parent]
+                    )
+                    if not dof_indices_parent:
+                        current = parent
+                        continue
+                    for local_r, dof_r in enumerate(dof_indices_i):
+                        for local_p, dof_p in enumerate(dof_indices_parent):
+                            sub_block = Bij[
+                                ..., local_r : local_r + 1, local_p : local_p + 1
+                            ]
+                            blocks[1 + dof_r][1 + dof_p] = sub_block
+                            blocks[1 + dof_p][1 + dof_r] = math.swapaxes(
+                                sub_block, -2, -1
+                            )
                 current = parent
 
         row_tensors = []
@@ -199,10 +226,16 @@ class RBDAlgorithms:
         for jidx in range(n):
             node_idx = joint_to_node.get(jidx)
             if node_idx is not None:
-                col = math.mtimes(
-                    math.swapaxes(X_G[node_idx], -2, -1),
-                    math.mtimes(Ic_comp[node_idx], Phi[node_idx]),
+                local_indices = self._expand_joint_indices(
+                    joint_indices[node_idx]
                 )
+                local_pos = local_indices.index(jidx)
+                F_node = math.mtimes(Ic_comp[node_idx], Phi[node_idx])
+                col_full = math.mtimes(
+                    math.swapaxes(X_G[node_idx], -2, -1),
+                    F_node,
+                )
+                col = col_full[..., :, local_pos : local_pos + 1]
             else:
                 col = zero_col
             joint_cols.append(col)
@@ -256,11 +289,17 @@ class RBDAlgorithms:
         chain = self.model.get_joints_chain(self.root_link, frame)
         I_H_L = base_transform
         for joint in chain:
-            q_ = (
-                joint_positions[..., joint.idx]
-                if joint.idx is not None
-                else self.math.zeros_like(joint_positions[..., 0])
-            )
+            dof_count = getattr(joint, "dofs", 1)
+            if joint.idx is not None:
+                q_ = joint_positions[..., joint.idx]
+            else:
+                batch = joint_positions.shape[:-1] if joint_positions.ndim > 1 else ()
+                if dof_count == 0:
+                    q_ = self.math.factory.zeros(batch + ())
+                elif dof_count == 1:
+                    q_ = self.math.zeros_like(joint_positions[..., 0])
+                else:
+                    q_ = self.math.factory.zeros(batch + (dof_count,))
             H_joint = joint.homogeneous(q=q_)
             I_H_L = I_H_L @ H_joint
         return I_H_L
@@ -291,16 +330,27 @@ class RBDAlgorithms:
         L_H_B = self.math.homogeneous_inverse(B_H_L)
         cols = [None] * self.NDoF
         for joint in chain:
-            q = (
-                joint_positions[..., joint.idx]
-                if joint.idx is not None
-                else self.math.zeros_like(joint_positions[..., 0])
-            )
+            dof_count = getattr(joint, "dofs", 1)
+            if joint.idx is not None:
+                q = joint_positions[..., joint.idx]
+            else:
+                batch = joint_positions.shape[:-1] if joint_positions.ndim > 1 else ()
+                if dof_count == 0:
+                    q = self.math.factory.zeros(batch + ())
+                elif dof_count == 1:
+                    q = self.math.zeros_like(joint_positions[..., 0])
+                else:
+                    q = self.math.factory.zeros(batch + (dof_count,))
             H_j = joint.homogeneous(q=q)
             B_H_j = B_H_j @ H_j
             L_H_j = L_H_B @ B_H_j
+            S = joint.motion_subspace(q)
             if joint.idx is not None:
-                cols[joint.idx] = self.math.adjoint(L_H_j) @ joint.motion_subspace()
+                J_j = self.math.adjoint(L_H_j) @ S
+                for local, global_idx in enumerate(
+                    self._expand_joint_indices(joint.idx)
+                ):
+                    cols[global_idx] = J_j[..., :, local : local + 1]
 
         zero_col = self.math.zeros(batch_size + (6, 1))
         cols = [zero_col if col is None else col for col in cols]
@@ -453,26 +503,40 @@ class RBDAlgorithms:
         chain = self.model.get_joints_chain(self.root_link, frame)
 
         for joint in chain:
+            dof_count = getattr(joint, "dofs", 1)
             if joint.idx is not None:
                 q = joint_positions[..., joint.idx]
                 q_dot = joint_velocities[..., joint.idx]
             else:
-                q = self.math.factory.zeros(batch_size + ())
-                q_dot = self.math.factory.zeros(batch_size + ())
+                q = self._zeros_for_dofs(dof_count, batch_size, reference=joint_positions)
+                q_dot = self._zeros_for_dofs(
+                    dof_count, batch_size, reference=joint_velocities
+                )
 
             H_j = joint.homogeneous(q=q)
             B_H_j = B_H_j @ H_j
             L_H_j = L_H_B @ B_H_j
-            S = joint.motion_subspace()
-            J_j = self.math.adjoint(L_H_j) @ S
-
-            v = v + self.math.vxs(J_j, q_dot)
-            J_dot_j = self.math.adjoint_derivative(L_H_j, v) @ S
-            a = a + self.math.vxs(J_dot_j, q_dot)
+            S = joint.motion_subspace(q)
+            if S.shape[-1] == 0:
+                J_j = self.math.factory.zeros(batch_size + (6, 0))
+                J_dot_j = self.math.factory.zeros(batch_size + (6, 0))
+            else:
+                J_j = self.math.adjoint(L_H_j) @ S
+                q_dot_vec = self._ensure_vector(q_dot, dof_count, batch_size)
+                v = v + self.math.mxv(J_j, q_dot_vec)
+                S_dot = joint.motion_subspace_dot(q, q_dot)
+                J_dot_j = (
+                    self.math.adjoint_derivative(L_H_j, v) @ S
+                    + self.math.adjoint(L_H_j) @ S_dot
+                )
+                a = a + self.math.mxv(J_dot_j, q_dot_vec)
 
             if joint.idx is not None:
-                cols[joint.idx] = J_j
-                cols_dot[joint.idx] = J_dot_j
+                for local, global_idx in enumerate(
+                    self._expand_joint_indices(joint.idx)
+                ):
+                    cols[global_idx] = J_j[..., :, local : local + 1]
+                    cols_dot[global_idx] = J_dot_j[..., :, local : local + 1]
 
         zero_col = self.math.factory.zeros(batch_size + (6, 1))
         cols = [zero_col if c is None else c for c in cols]
@@ -615,12 +679,12 @@ class RBDAlgorithms:
         node_count = self._node_count
         parent_indices = self._parent_indices
         joint_indices = self._joint_indices_per_node
-        motion_subspaces = self._motion_subspaces
         inertias = self._spatial_inertias
         joints = self._joints_per_node
         root_idx = self._root_index
         node_indices = self._node_indices
         rev_indices = self._rev_node_indices
+        joint_dofs = self._dofs_per_node
 
         batch_shape = (
             tuple(base_transform.shape[:-2]) if base_transform.ndim > 2 else ()
@@ -649,12 +713,26 @@ class RBDAlgorithms:
 
         a0 = -(math.mxv(gravity_X, g)) + transformed_acc
 
-        if n > 0:
-            zero_q = math.zeros_like(joint_positions[..., 0])
-            zero_qd = math.zeros_like(joint_velocities[..., 0])
-        else:
-            zero_q = math.zeros_like(base_velocity[..., 0])
-            zero_qd = zero_q
+        zero_scalar_q = (
+            math.zeros_like(joint_positions[..., 0])
+            if n > 0
+            else math.zeros_like(base_velocity[..., 0])
+        )
+        zero_scalar_qd = (
+            math.zeros_like(joint_velocities[..., 0])
+            if n > 0
+            else zero_scalar_q
+        )
+
+        def zeros_for_dofs(count: int, zero_scalar):
+            if count == 0:
+                return math.factory.zeros(batch_shape + ())
+            if count == 1:
+                return zero_scalar
+            return math.factory.zeros(batch_shape + (count,))
+
+        def zeros6():
+            return math.factory.zeros(batch_shape + (6,))
 
         Ic = [None] * node_count
         Xup = [None] * node_count
@@ -675,14 +753,30 @@ class RBDAlgorithms:
             parent = parent_indices[idx]
             joint_idx = joint_indices[idx]
 
-            q = joint_positions[..., joint_idx] if joint_idx is not None else zero_q
-            qd = joint_velocities[..., joint_idx] if joint_idx is not None else zero_qd
+            dof_count = joint_dofs[idx]
+            q = (
+                joint_positions[..., joint_idx]
+                if joint_idx is not None
+                else zeros_for_dofs(dof_count, zero_scalar_q)
+            )
+            qd = (
+                joint_velocities[..., joint_idx]
+                if joint_idx is not None
+                else zeros_for_dofs(dof_count, zero_scalar_qd)
+            )
 
             X = joint.spatial_transform(q=q)
             Xup[idx] = X
 
-            Phi_i = motion_subspaces[idx]
-            phi_qd = math.vxs(Phi_i, qd)
+            joint = joints[idx]
+            Phi_i = (
+                joint.motion_subspace(q) if joint is not None else self._root_motion_subspace
+            )
+            if Phi_i.shape[-1] == 0:
+                phi_qd = zeros6()
+            else:
+                qd_vec = self._ensure_vector(qd, dof_count, batch_shape)
+                phi_qd = math.mxv(Phi_i, qd_vec)
             v[idx] = math.mxv(X, v[parent]) + phi_qd
             a[idx] = math.mxv(X, a[parent]) + math.mxv(
                 math.spatial_skew(v[idx]), phi_qd
@@ -701,7 +795,12 @@ class RBDAlgorithms:
         tau_joint_cols = [None] * n if n > 0 else []
 
         for idx in rev_indices:
-            Phi_i = motion_subspaces[idx]
+            joint = joints[idx]
+            Phi_i = (
+                joint.motion_subspace(q if (joint is not None and joint_indices[idx] is not None) else None)
+                if joint is not None
+                else self._root_motion_subspace
+            )
             Fi = f[idx]
             Phi_T = math.swapaxes(Phi_i, -2, -1)
 
@@ -710,7 +809,13 @@ class RBDAlgorithms:
             else:
                 joint_idx = joint_indices[idx]
                 if joint_idx is not None:
-                    tau_joint_cols[joint_idx] = math.mxv(Phi_T, Fi)
+                    joint_tau = math.mxv(Phi_T, Fi)
+                    for local, global_idx in enumerate(
+                        self._expand_joint_indices(joint_idx)
+                    ):
+                        tau_joint_cols[global_idx] = joint_tau[
+                            ..., local : local + 1
+                        ]
                 parent = parent_indices[idx]
                 if parent >= 0:
                     f[parent] = f[parent] + math.mxv(
@@ -759,12 +864,12 @@ class RBDAlgorithms:
         node_count = self._node_count
         parent_indices = self._parent_indices
         joint_indices = self._joint_indices_per_node
-        motion_subspaces = self._motion_subspaces
         inertias = self._spatial_inertias
         joints = self._joints_per_node
         root_idx = self._root_index
         node_indices = self._node_indices
         rev_indices = self._rev_node_indices
+        joint_dofs = self._dofs_per_node
 
         (
             base_transform,
@@ -836,11 +941,6 @@ class RBDAlgorithms:
                 expanded = math.expand_dims(expanded, axis=-1)
             return expanded
 
-        if n > 0:
-            zero_q = math.zeros_like(joint_positions[..., 0])
-        else:
-            zero_q = math.zeros_like(base_velocity[..., 0])
-
         def tile_batch(arr):
             if not batch_shape:
                 return arr
@@ -867,19 +967,38 @@ class RBDAlgorithms:
                 parent = parent_indices[idx]
                 joint = joints[idx]
                 joint_idx = joint_indices[idx]
-                q_i = (
-                    joint_positions[..., joint_idx] if joint_idx is not None else zero_q
-                )
+                dof_count = joint_dofs[idx]
+                if joint_idx is not None:
+                    q_i = joint_positions[..., joint_idx]
+                else:
+                    q_i = self._zeros_for_dofs(
+                        dof_count, batch_shape, reference=joint_positions
+                    )
                 X_current = joint.spatial_transform(q=q_i)
                 Xup[idx] = X_current
 
                 g_acc[idx] = math.mxv(X_current, g_acc[parent])
 
-                if joint_idx is not None:
-                    Si = tile_batch(motion_subspaces[idx])
-                    Scols[idx] = Si
-                    qd_i = joint_velocities[..., joint_idx]
-                    vJ = math.vxs(Si, qd_i)
+                if joint is not None:
+                    S_i = joint.motion_subspace(q_i)
+                    if S_i.shape[-1] > 0:
+                        Si = tile_batch(S_i)
+                        Scols[idx] = Si
+                        if joint_idx is not None:
+                            qd_i = joint_velocities[..., joint_idx]
+                        else:
+                            qd_i = self._zeros_for_dofs(
+                                dof_count,
+                                batch_shape,
+                                reference=joint_velocities,
+                            )
+                        qd_vec = self._ensure_vector(
+                            qd_i, dof_count, batch_shape
+                        )
+                        vJ = math.mxv(Si, qd_vec)
+                    else:
+                        Scols[idx] = None
+                        vJ = zeros6()
                 else:
                     Scols[idx] = None
                     vJ = zeros6()
@@ -907,8 +1026,14 @@ class RBDAlgorithms:
                 U_i = math.mtimes(IA[idx], Si)
                 d_i = math.mtimes(math.swapaxes(Si, -2, -1), U_i)
                 joint_idx = joint_indices[idx]
-                tau_vec = joint_torques_eff[..., joint_idx]
-                Si_T_pA = math.mxv(math.swapaxes(Si, -2, -1), pA[idx])[..., 0]
+                dof_count = joint_dofs[idx]
+                if joint_idx is not None:
+                    tau_vec = joint_torques_eff[..., joint_idx]
+                else:
+                    tau_vec = self._zeros_for_dofs(
+                        dof_count, batch_shape, reference=joint_torques_eff
+                    )
+                Si_T_pA = math.mxv(math.swapaxes(Si, -2, -1), pA[idx])
                 u_i = tau_vec - Si_T_pA
 
                 d_list[idx] = d_i
@@ -952,15 +1077,20 @@ class RBDAlgorithms:
 
             if Si is not None and joint_idx is not None:
                 U_i = U_list[idx]
-                U_T_rel_acc = math.mxv(math.swapaxes(U_i, -2, -1), rel_acc)[..., 0]
+                U_T_rel_acc = math.mxv(math.swapaxes(U_i, -2, -1), rel_acc)
                 num = u_list[idx] - U_T_rel_acc
                 inv_d = inv_d_list[idx]
                 num_expanded = expand_to_match(num, inv_d)
-                gain_qdd = math.mtimes(inv_d, num_expanded)
-                qdd_col = gain_qdd[..., 0]
-                if joint_idx < n:
-                    qdd_entries[joint_idx] = qdd_col
-                a_correction_vec = math.mxv(Si, qdd_col)
+                qdd_vec = math.mtimes(inv_d, num_expanded)
+                qdd_vector = qdd_vec[..., :, 0]
+                for local, global_idx in enumerate(
+                    self._expand_joint_indices(joint.idx)
+                ):
+                    if global_idx < n:
+                        qdd_entries[global_idx] = qdd_vec[
+                            ..., local : local + 1, 0
+                        ]
+                a_correction_vec = math.mxv(Si, qdd_vector)
                 a[idx] = a_pre + a_correction_vec
             else:
                 a[idx] = a_pre
@@ -1002,6 +1132,50 @@ class RBDAlgorithms:
                 converted.append(self.math.asarray(arg))
         return converted[0] if len(converted) == 1 else converted
 
+    @staticmethod
+    def _expand_joint_indices(
+        joint_idx: int | tuple[int, ...] | None,
+    ) -> tuple[int, ...]:
+        if joint_idx is None:
+            return ()
+        if isinstance(joint_idx, int):
+            return (joint_idx,)
+        return tuple(joint_idx)
+
+    def _zeros_for_dofs(
+        self,
+        dof_count: int,
+        batch_shape: tuple[int, ...],
+        reference: npt.ArrayLike | None = None,
+    ):
+        """
+        Returns a zero vector with shape matching the provided dof_count and batch_shape.
+        If reference is provided and dof_count==1, it is used to preserve dtype/device.
+        """
+        if dof_count == 0:
+            return self.math.factory.zeros(batch_shape + ())
+        if dof_count == 1:
+            if reference is not None:
+                try:
+                    return self.math.zeros_like(reference[..., 0])
+                except Exception:
+                    return self.math.zeros_like(reference)
+            return self.math.factory.zeros(batch_shape + ())
+        return self.math.factory.zeros(batch_shape + (dof_count,))
+
+    def _ensure_vector(
+        self, vec: npt.ArrayLike, dof_count: int, batch_shape: tuple[int, ...]
+    ) -> npt.ArrayLike:
+        """Ensure joint coordinate vectors have an explicit trailing dimension."""
+        if dof_count == 0:
+            return vec
+        # If vec has no trailing dimension, add one
+        if getattr(vec, "shape", ()) == batch_shape:
+            return self.math.expand_dims(vec, axis=-1)
+        if vec.shape and vec.shape[-1] == dof_count:
+            return vec
+        return vec
+
     def _prepare_tree_cache(self) -> None:
         """Pre-compute static tree data so the dynamic algorithms avoid repeated Python work."""
         nodes = list(self.model.tree)
@@ -1009,11 +1183,13 @@ class RBDAlgorithms:
         self._node_indices = tuple(range(node_count))
         self._rev_node_indices = tuple(reversed(self._node_indices))
         self._parent_indices = [-1] * node_count
-        self._joint_indices_per_node: list[int | None] = [None] * node_count
-        self._motion_subspaces: list[npt.ArrayLike] = [None] * node_count
+        self._joint_indices_per_node: list[int | tuple[int, ...] | None] = [
+            None
+        ] * node_count
         self._spatial_inertias: list[npt.ArrayLike] = [None] * node_count
         self._joints_per_node: list[Joint | None] = [None] * node_count
         self._joint_index_to_node: dict[int, int] = {}
+        self._dofs_per_node: list[int] = [0] * node_count
 
         for idx, node in enumerate(nodes):
             link, joint, parent_link = node.get_elements()
@@ -1026,13 +1202,14 @@ class RBDAlgorithms:
             )
             self._parent_indices[idx] = parent_idx
             if joint is None:
-                self._motion_subspaces[idx] = self._root_motion_subspace
                 self._joint_indices_per_node[idx] = None
+                self._dofs_per_node[idx] = self._root_motion_subspace.shape[-1]
             else:
-                self._motion_subspaces[idx] = joint.motion_subspace()
                 self._joint_indices_per_node[idx] = joint.idx
+                self._dofs_per_node[idx] = getattr(joint, "dofs", 1)
                 if joint.idx is not None:
-                    self._joint_index_to_node[int(joint.idx)] = idx
+                    for dof in self._expand_joint_indices(joint.idx):
+                        self._joint_index_to_node[int(dof)] = idx
 
         self._root_index = self.model.tree.get_idx_from_name(self.root_link)
         self._node_count = node_count

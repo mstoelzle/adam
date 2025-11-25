@@ -220,9 +220,71 @@ def to_idyntree_model(model: Model) -> idyntree.bindings.Model:
     for node in model.tree:
         for j in node.arcs:
             assert j.name not in model.frames
-            joint = to_idyntree_joint(j, links_map[j.parent], links_map[j.child])
-            joint_index = output.addJoint(j.name, joint)
-            assert output.isValidJointIndex(joint_index)
+            if j.type == "spherical":
+                parent_idx = links_map[j.parent]
+                child_idx = links_map[j.child]
+
+                # Create intermediate links
+                link_dummy = idyntree.bindings.Link()  # Massless, inertialsess
+                link_dummy.setInertia(idyntree.bindings.SpatialInertia.Zero())
+
+                link1_name = f"{j.name}_dummy_link1"
+                link2_name = f"{j.name}_dummy_link2"
+
+                link1_idx = output.addLink(link1_name, link_dummy)
+                link2_idx = output.addLink(link2_name, link_dummy)
+
+                # Joint 1: Roll (X)
+                joint1 = idyntree.bindings.RevoluteJoint()
+                joint1.setAttachedLinks(parent_idx, link1_idx)
+
+                rest_position = idyntree.bindings.Position.FromPython(
+                    _to_sequence(j.origin.xyz)
+                )
+                rest_rotation = idyntree.bindings.Rotation.RPY(
+                    *_to_sequence(j.origin.rpy)
+                )
+                rest_transform = idyntree.bindings.Transform()
+                rest_transform.setRotation(rest_rotation)
+                rest_transform.setPosition(rest_position)
+
+                joint1.setRestTransform(rest_transform)
+
+                axis1 = idyntree.bindings.Axis()
+                axis1.setDirection(idyntree.bindings.Direction(1, 0, 0))
+                axis1.setOrigin(idyntree.bindings.Position.Zero())
+                joint1.setAxis(axis1, link1_idx, parent_idx)
+
+                output.addJoint(f"{j.name}_roll", joint1)
+
+                # Joint 2: Pitch (Y)
+                joint2 = idyntree.bindings.RevoluteJoint()
+                joint2.setAttachedLinks(link1_idx, link2_idx)
+                joint2.setRestTransform(idyntree.bindings.Transform.Identity())
+
+                axis2 = idyntree.bindings.Axis()
+                axis2.setDirection(idyntree.bindings.Direction(0, 1, 0))
+                axis2.setOrigin(idyntree.bindings.Position.Zero())
+                joint2.setAxis(axis2, link2_idx, link1_idx)
+
+                output.addJoint(f"{j.name}_pitch", joint2)
+
+                # Joint 3: Yaw (Z)
+                joint3 = idyntree.bindings.RevoluteJoint()
+                joint3.setAttachedLinks(link2_idx, child_idx)
+                joint3.setRestTransform(idyntree.bindings.Transform.Identity())
+
+                axis3 = idyntree.bindings.Axis()
+                axis3.setDirection(idyntree.bindings.Direction(0, 0, 1))
+                axis3.setOrigin(idyntree.bindings.Position.Zero())
+                joint3.setAxis(axis3, child_idx, link2_idx)
+
+                output.addJoint(f"{j.name}_yaw", joint3)
+
+            else:
+                joint = to_idyntree_joint(j, links_map[j.parent], links_map[j.child])
+                joint_index = output.addJoint(j.name, joint)
+                assert output.isValidJointIndex(joint_index)
 
     frames_list = [f + "_fixed_joint" for f in model.frames]
     for name in model.joints:
@@ -246,7 +308,16 @@ def to_idyntree_model(model: Model) -> idyntree.bindings.Model:
             assert ok
 
     model_reducer = idyntree.bindings.ModelLoader()
-    model_reducer.loadReducedModelFromFullModel(output, model.actuated_joints)
+    actuated_joints = []
+    for j_name in model.actuated_joints:
+        if model.joints[j_name].type == "spherical":
+            actuated_joints.append(f"{j_name}_roll")
+            actuated_joints.append(f"{j_name}_pitch")
+            actuated_joints.append(f"{j_name}_yaw")
+        else:
+            actuated_joints.append(j_name)
+
+    model_reducer.loadReducedModelFromFullModel(output, actuated_joints)
     output_reduced = model_reducer.model().copy()
 
     assert output_reduced.isValid()
