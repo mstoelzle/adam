@@ -7,8 +7,8 @@ from adam.pytorch import KinDynComputations
 
 
 @pytest.fixture(scope="module")
-def setup_test(tests_setup_with_spherical, device) -> KinDynComputations | RobotCfg | State:
-    robot_cfg, state = tests_setup_with_spherical
+def setup_test(tests_setup, device) -> KinDynComputations | RobotCfg | State:
+    robot_cfg, state = tests_setup
     adam_kin_dyn = KinDynComputations(
         robot_cfg.model_path,
         robot_cfg.joints_name_list,

@@ -74,14 +74,7 @@ VELOCITY_REPRESENTATIONS = [
     Representations.BODY_FIXED_REPRESENTATION,
 ]
 
-# Robots with standard revolute/prismatic joints (fully tested)
 ROBOTS = [
-    "iCubGenova04",
-    "StickBot",
-]
-
-# Robots with spherical joints (partial support, some tests may fail)
-ROBOTS_WITH_SPHERICAL = [
     "iCubGenova04",
     "StickBot",
     "SmplHumanoid",
@@ -173,15 +166,17 @@ def get_robot_frames(robot_name: str) -> dict:
         }
 
 
-TEST_CONFIGURATIONS = list(product(VELOCITY_REPRESENTATIONS, ROBOTS))
-TEST_CONFIGURATIONS_WITH_SPHERICAL = list(
-    product(VELOCITY_REPRESENTATIONS, ROBOTS_WITH_SPHERICAL)
+TEST_CONFIGURATIONS = list(
+    product(VELOCITY_REPRESENTATIONS, ROBOTS)
 )
 
 
-@pytest.fixture(scope="module", params=TEST_CONFIGURATIONS, ids=str)
+@pytest.fixture(
+    scope="module", params=TEST_CONFIGURATIONS, ids=str
+)
 def tests_setup(request) -> RobotCfg | State:
-    """Fixture for robots with standard revolute/prismatic joints only."""
+    """Fixture for both sample systems with revolute and spherical joints.
+    """
     velocity_representation, robot_name = request.param
 
     np.random.seed(42)
@@ -193,17 +188,41 @@ def tests_setup(request) -> RobotCfg | State:
     logging.basicConfig(level=logging.DEBUG)
     logging.debug("Showing the robot tree.")
 
-    robot_iDyn = idyntree.ModelLoader()
-    robot_iDyn.loadReducedModelFromFile(model_path, joints_name_list)
+    if is_spherical_robot(robot_name):
+        # For robots with spherical joints, we need to load via ADAM first
+        # and then convert to iDynTree model
+        adam_numpy_kin_dyn = KinDynComputationsNumpy(
+            model_path, joints_name_list
+        )
+        idyn_model = to_idyntree_model(adam_numpy_kin_dyn.rbdalgos.model)
 
-    kin_dyn = idyntree.KinDynComputations()
-    kin_dyn.loadRobotModel(robot_iDyn.model())
+        kin_dyn = idyntree.KinDynComputations()
+        assert kin_dyn.loadRobotModel(idyn_model)
 
-    n_dof = len(joints_name_list)
+        n_dof = adam_numpy_kin_dyn.NDoF  # velocity DOFs
+        n_pos_dof = adam_numpy_kin_dyn.rbdalgos.NPosDof  # position DOFs
 
-    # joints quantities
-    joints_val = (np.random.rand(n_dof) - 0.5) * 5
-    joints_dot_val = (np.random.rand(n_dof) - 0.5) * 5
+        # Generate random joint positions (quaternions for spherical joints)
+        n_spherical_joints = len(joints_name_list)
+        joints_val = np.zeros(n_pos_dof)
+        for i in range(n_spherical_joints):
+            quat = generate_random_quaternion()
+            joints_val[i * 4:(i + 1) * 4] = quat
+
+        # Velocities are 3 DOFs per spherical joint
+        joints_dot_val = (np.random.rand(n_dof) - 0.5) * 5
+    else:
+        robot_iDyn = idyntree.ModelLoader()
+        robot_iDyn.loadReducedModelFromFile(model_path, joints_name_list)
+
+        kin_dyn = idyntree.KinDynComputations()
+        kin_dyn.loadRobotModel(robot_iDyn.model())
+
+        n_dof = len(joints_name_list)
+
+        # joints quantities
+        joints_val = (np.random.rand(n_dof) - 0.5) * 5
+        joints_dot_val = (np.random.rand(n_dof) - 0.5) * 5
 
     if velocity_representation == Representations.BODY_FIXED_REPRESENTATION:
         idyn_representation = idyntree.BODY_FIXED_REPRESENTATION
@@ -404,104 +423,3 @@ def to_numpy(x):
         x = x.cpu()
     return x.detach().numpy()
 
-
-@pytest.fixture(
-    scope="module", params=TEST_CONFIGURATIONS_WITH_SPHERICAL, ids=str
-)
-def tests_setup_with_spherical(request) -> RobotCfg | State:
-    """Fixture that includes robots with spherical joints.
-    
-    Note: Some tests may fail for spherical joint robots as support
-    is still partial (e.g., jacobian_dot, coriolis_term).
-    """
-    velocity_representation, robot_name = request.param
-
-    np.random.seed(42)
-
-    model_path = get_robot_model_path(robot_name)
-    joints_name_list = get_robot_joints_list(robot_name)
-    frames = get_robot_frames(robot_name)
-
-    logging.basicConfig(level=logging.DEBUG)
-    logging.debug("Showing the robot tree.")
-
-    if is_spherical_robot(robot_name):
-        # For robots with spherical joints, we need to load via ADAM first
-        # and then convert to iDynTree model
-        adam_numpy_kin_dyn = KinDynComputationsNumpy(
-            model_path, joints_name_list
-        )
-        idyn_model = to_idyntree_model(adam_numpy_kin_dyn.rbdalgos.model)
-
-        kin_dyn = idyntree.KinDynComputations()
-        assert kin_dyn.loadRobotModel(idyn_model)
-
-        n_dof = adam_numpy_kin_dyn.NDoF  # velocity DOFs
-        n_pos_dof = adam_numpy_kin_dyn.rbdalgos.NPosDof  # position DOFs
-
-        # Generate random joint positions (quaternions for spherical joints)
-        n_spherical_joints = len(joints_name_list)
-        joints_val = np.zeros(n_pos_dof)
-        for i in range(n_spherical_joints):
-            quat = generate_random_quaternion()
-            joints_val[i * 4:(i + 1) * 4] = quat
-
-        # Velocities are 3 DOFs per spherical joint
-        joints_dot_val = (np.random.rand(n_dof) - 0.5) * 5
-    else:
-        robot_iDyn = idyntree.ModelLoader()
-        robot_iDyn.loadReducedModelFromFile(model_path, joints_name_list)
-
-        kin_dyn = idyntree.KinDynComputations()
-        kin_dyn.loadRobotModel(robot_iDyn.model())
-
-        n_dof = len(joints_name_list)
-
-        # joints quantities
-        joints_val = (np.random.rand(n_dof) - 0.5) * 5
-        joints_dot_val = (np.random.rand(n_dof) - 0.5) * 5
-
-    if velocity_representation == Representations.BODY_FIXED_REPRESENTATION:
-        idyn_representation = idyntree.BODY_FIXED_REPRESENTATION
-    elif velocity_representation == Representations.MIXED_REPRESENTATION:
-        idyn_representation = idyntree.MIXED_REPRESENTATION
-    else:
-        raise ValueError(
-            f"Unknown velocity representation: {velocity_representation}"
-        )
-    kin_dyn.setFrameVelocityRepresentation(idyn_representation)
-
-    # base quantities
-    xyz = (np.random.rand(3) - 0.5) * 5
-    rpy = (np.random.rand(3) - 0.5) * 5
-    base_vel = (np.random.rand(6) - 0.5) * 5
-
-    g = np.array([0, 0, -9.80665])
-    R_b = Rotation.from_euler("xyz", rpy).as_matrix()
-    H_b = np.eye(4)
-    H_b[:3, :3] = R_b
-    H_b[:3, 3] = xyz
-
-    state = State(
-        H=H_b,
-        joints_pos=joints_val,
-        base_vel=base_vel,
-        joints_vel=joints_dot_val,
-        gravity=g,
-    )
-
-    idyn_function_values = compute_idyntree_values(kin_dyn, state, frames)
-
-    robot_cfg = RobotCfg(
-        robot_name=robot_name,
-        velocity_representation=velocity_representation,
-        model_path=model_path,
-        joints_name_list=joints_name_list,
-        n_dof=n_dof,
-        kin_dyn=kin_dyn,
-        idyn_function_values=idyn_function_values,
-        frame=frames["frame"],
-        frame_non_actuated=frames["frame_non_actuated"],
-    )
-
-    yield robot_cfg, state

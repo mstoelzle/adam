@@ -16,9 +16,9 @@ from adam.pytorch import KinDynComputationsBatch
 
 @pytest.fixture(scope="module")
 def setup_test(
-    tests_setup_with_spherical, device
+    tests_setup, device
 ) -> KinDynComputationsBatch | RobotCfg | State:
-    robot_cfg, state = tests_setup_with_spherical
+    robot_cfg, state = tests_setup
 
     adam_kin_dyn = KinDynComputationsBatch(
         robot_cfg.model_path,
