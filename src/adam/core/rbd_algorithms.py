@@ -1044,6 +1044,7 @@ class RBDAlgorithms:
                 dof_count = joint_dofs[idx]
                 if vel_joint_idx is not None:
                     tau_vec = joint_torques_eff[..., vel_joint_idx]
+                    tau_vec = self._ensure_vector(tau_vec, dof_count, batch_shape)
                 else:
                     tau_vec = self._zeros_for_dofs(
                         dof_count, batch_shape, reference=joint_torques_eff
