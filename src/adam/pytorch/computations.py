@@ -40,6 +40,7 @@ class KinDynComputations:
         model = Model.build(factory=factory, joints_name_list=joints_name_list)
         self.rbdalgos = RBDAlgorithms(model=model, math=math)
         self.NDoF = self.rbdalgos.NDoF
+        self.NPosDof = self.rbdalgos.NPosDof
         self.g = gravity.to(dtype=dtype, device=device)
         if root_link is not None:
             warnings.warn(

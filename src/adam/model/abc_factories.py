@@ -92,9 +92,17 @@ class Joint(abc.ABC):
     origin: Pose
     limit: Limits
     idx: int | tuple[int, ...] | None = None
+    vel_idx: int | tuple[int, ...] | None = None
     dofs: int = 1
+    pos_dofs: int = 1
     """
     Abstract base class for all joints.
+    
+    Attributes:
+        idx: Index into position coordinates array
+        vel_idx: Index into velocity coordinates array
+        dofs: Number of velocity DOFs (generalized velocities)
+        pos_dofs: Number of position coordinates (may differ for spherical joints)
     """
 
     @abc.abstractmethod

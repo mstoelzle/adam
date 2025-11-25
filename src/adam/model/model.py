@@ -15,6 +15,7 @@ class Model:
     joints: dict[str, Joint]
     tree: Tree
     NDoF: int
+    NPosDof: int  # Number of position coordinates (may differ for spherical joints)
     actuated_joints: list[str]
 
     @property
@@ -59,22 +60,35 @@ class Model:
                 )
 
         # set idx to the actuated joints
-        current_idx = 0
+        # idx is the index into the position coordinates array
+        # vel_idx is the index into the velocity coordinates array
+        current_pos_idx = 0
+        current_vel_idx = 0
         for joint_str in joints_name_list:
             for joint in joints_list:
                 if joint.name != joint_str:
                     continue
                 dofs = getattr(joint, "dofs", None)
+                pos_dofs = getattr(joint, "pos_dofs", None)
                 if dofs is None:
                     dofs = 1
+                if pos_dofs is None:
+                    pos_dofs = dofs  # Default: pos_dofs == dofs
                 if joint.type == "fixed" or dofs == 0:
                     joint.idx = None
+                    joint.vel_idx = None
                     dofs = 0
-                elif dofs == 1:
-                    joint.idx = current_idx
+                    pos_dofs = 0
+                elif pos_dofs == 1:
+                    joint.idx = current_pos_idx
+                    joint.vel_idx = current_vel_idx
                 else:
-                    joint.idx = tuple(range(current_idx, current_idx + dofs))
-                current_idx += dofs
+                    joint.idx = tuple(range(current_pos_idx,
+                                            current_pos_idx + pos_dofs))
+                    joint.vel_idx = tuple(range(current_vel_idx,
+                                                current_vel_idx + dofs))
+                current_pos_idx += pos_dofs
+                current_vel_idx += dofs
                 break
 
         tree = Tree.build_tree(links=links_list, joints=joints_list)
@@ -90,7 +104,8 @@ class Model:
             frames=frames,
             joints=joints,
             tree=tree,
-            NDoF=current_idx,
+            NDoF=current_vel_idx,
+            NPosDof=current_pos_idx,
             actuated_joints=joints_name_list,
         )
 

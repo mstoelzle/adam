@@ -27,12 +27,26 @@ class StdJoint(Joint):
         self.limit = self._set_limits(joint.limit)
         self.idx = idx
         self.dofs = self._infer_dofs()
+        self.pos_dofs = self._infer_pos_dofs()
 
     def _infer_dofs(self) -> int:
+        """Number of velocity DOFs (generalized velocities)."""
         if self.type == "fixed":
             return 0
         if self.type == "spherical":
-            return 3
+            return 3  # Angular velocity has 3 components
+        return 1
+
+    def _infer_pos_dofs(self) -> int:
+        """Number of position coordinates (generalized positions).
+        
+        For most joints this equals dofs, but spherical joints use
+        4 quaternion coordinates for position while having 3 velocity DOFs.
+        """
+        if self.type == "fixed":
+            return 0
+        if self.type == "spherical":
+            return 4  # Quaternion (w, x, y, z) has 4 components
         return 1
 
     def _set_axis(self, axis: npt.ArrayLike) -> npt.ArrayLike:
@@ -137,6 +151,7 @@ class StdJoint(Joint):
         """
         Args:
             joint (Joint): Joint
+            q (npt.ArrayLike): joint position (used for position-dependent S)
 
         Returns:
             npt.ArrayLike: motion subspace of the joint
@@ -154,48 +169,14 @@ class StdJoint(Joint):
             )
             return self.math.vertcat(axis[0], axis[1], axis[2], zero, zero, zero)
         elif self.type in ["spherical"]:
-            if q is None:
-                zeros = self.math.zeros(3, 3)
-                eye = self.math.eye(3)
-                return self.math.vertcat([zeros, eye])
-
-            q1 = q[..., 1]
-            q2 = q[..., 2]
-
-            # S = [0; S_ang]
-            # S_ang columns are the axes of rotation expressed in the child frame
-            # Col 1: Rz(-q2) * Ry(-q1) * [1; 0; 0]
-            # Col 2: Rz(-q2) * [0; 1; 0]
-            # Col 3: [0; 0; 1]
-
-            Rz_neg_q2 = self.math.Rz(-q2)
-            Ry_neg_q1 = self.math.Ry(-q1)
-
-            # We need to handle batching for the axes
-            batch_shape = q.shape[:-1]
-
-            # Helper to create batched axis
-            def make_axis(v):
-                return self.math.asarray(v)
-
-            x_axis = make_axis([1.0, 0.0, 0.0])
-            y_axis = make_axis([0.0, 1.0, 0.0])
-            z_axis = make_axis([0.0, 0.0, 1.0])
-
-            col3_ang = z_axis
-            if len(batch_shape) > 0:
-                col3_ang = self.math.tile(z_axis, batch_shape + (1,))
-                x_axis = self.math.tile(x_axis, batch_shape + (1,))
-                y_axis = self.math.tile(y_axis, batch_shape + (1,))
-
-            col2_ang = self.math.mxv(Rz_neg_q2, y_axis)
-            col1_ang = self.math.mxv(
-                Rz_neg_q2, self.math.mxv(Ry_neg_q1, x_axis)
-            )
-
-            S_ang = self.math.stack([col1_ang, col2_ang, col3_ang], axis=-1)
-            S_lin = self.math.zeros_like(S_ang)
-            return self.math.concatenate([S_lin, S_ang], axis=-2)
+            # For spherical joints using quaternion position + angular velocity:
+            # The motion subspace S maps angular velocity (3 DOFs) to spatial velocity
+            # S = [0; I_3x3] - angular velocity expressed in child frame
+            # This is constant (does not depend on q) when using angular velocity
+            # as the velocity coordinates (like iDynTree SphericalJoint)
+            zeros = self.math.zeros(3, 3)
+            eye = self.math.eye(3)
+            return self.math.vertcat(zeros, eye)
 
     def motion_subspace_dot(
         self, q: npt.ArrayLike, q_dot: npt.ArrayLike
@@ -208,74 +189,8 @@ class StdJoint(Joint):
         Returns:
             npt.ArrayLike: time derivative of the motion subspace of the joint
         """
-        if self.type in ["fixed", "revolute", "continuous", "prismatic"]:
-            # For these joints, S is constant, so S_dot is zero
-            S = self.motion_subspace(q)
-            return self.math.zeros_like(S)
-        elif self.type in ["spherical"]:
-            q1 = q[..., 1]
-            q2 = q[..., 2]
-            qd1 = q_dot[..., 1]
-            qd2 = q_dot[..., 2]
-
-            # S_dot = [0; S_ang_dot]
-            # S_ang_dot columns:
-            # Col 3: 0
-            # Col 2: -qd2 * (e3 x S2)
-            # Col 1: -qd2 * (e3 x S1) - qd1 * Rz(-q2) * (e2 x (Ry(-q1) * e1))
-
-            Rz_neg_q2 = self.math.Rz(-q2)
-            Ry_neg_q1 = self.math.Ry(-q1)
-
-            batch_shape = q.shape[:-1]
-
-            def make_axis(v):
-                return self.math.asarray(v)
-
-            x_axis = make_axis([1.0, 0.0, 0.0])
-            y_axis = make_axis([0.0, 1.0, 0.0])
-            z_axis = make_axis([0.0, 0.0, 1.0])
-
-            if len(batch_shape) > 0:
-                x_axis = self.math.tile(x_axis, batch_shape + (1,))
-                y_axis = self.math.tile(y_axis, batch_shape + (1,))
-                z_axis = self.math.tile(z_axis, batch_shape + (1,))
-
-            # Calculate S columns again (angular part)
-            col3_ang = z_axis
-            col2_ang = self.math.mxv(Rz_neg_q2, y_axis)
-            Ry_neg_q1_x = self.math.mxv(Ry_neg_q1, x_axis)
-            col1_ang = self.math.mxv(Rz_neg_q2, Ry_neg_q1_x)
-
-            # Calculate derivatives
-            # Col 3 dot is zero
-            col3_dot_ang = self.math.zeros_like(col3_ang)
-
-            # Col 2 dot = -qd2 * (z x col2_ang)
-            z_skew = self.math.skew(z_axis)
-            z_cross_col2 = self.math.mxv(z_skew, col2_ang)
-
-            # qd2 needs to be broadcastable to vector
-            qd2_expanded = qd2[..., None]
-            col2_dot_ang = -qd2_expanded * z_cross_col2
-
-            # Col 1 dot
-            # Term 1: -qd2 * (z x col1_ang)
-            z_cross_col1 = self.math.mxv(z_skew, col1_ang)
-            term1 = -qd2_expanded * z_cross_col1
-
-            # Term 2: -qd1 * Rz(-q2) * (y x Ry(-q1) * x)
-            # y x Ry(-q1) * x = y x Ry_neg_q1_x
-            y_skew = self.math.skew(y_axis)
-            y_cross_Ry_x = self.math.mxv(y_skew, Ry_neg_q1_x)
-            Rz_y_cross_Ry_x = self.math.mxv(Rz_neg_q2, y_cross_Ry_x)
-            qd1_expanded = qd1[..., None]
-            term2 = -qd1_expanded * Rz_y_cross_Ry_x
-
-            col1_dot_ang = term1 + term2
-
-            S_dot_ang = self.math.stack(
-                [col1_dot_ang, col2_dot_ang, col3_dot_ang], axis=-1
-            )
-            S_dot_lin = self.math.zeros_like(S_dot_ang)
-            return self.math.concatenate([S_dot_lin, S_dot_ang], axis=-2)
+        # For spherical joints with quaternion position + angular velocity,
+        # the motion subspace S = [0; I] is constant, so S_dot = 0
+        # This is because angular velocity directly gives body angular velocity.
+        S = self.motion_subspace(q)
+        return self.math.zeros_like(S)

@@ -464,14 +464,14 @@ class SpatialMath:
         Args:
             xyz (npt.ArrayLike): joint origin in the urdf
             rpy (npt.ArrayLike): joint orientation in the urdf
-            q (npt.ArrayLike): joint angles [roll, pitch, yaw]
+            q (npt.ArrayLike): unit quaternion [w, x, y, z] representing joint rotation
 
         Returns:
             npt.ArrayLike: Homogeneous transform
         """
-        if q.shape[-1] != 3:
+        if q.shape[-1] != 4:
             raise ValueError(
-                f"Spherical joints expect 3 DoFs, received shape {q.shape}"
+                f"Spherical joints expect quaternion (4 values), received shape {q.shape}"
             )
 
         if q.ndim > 1:
@@ -487,13 +487,12 @@ class SpatialMath:
                 )
 
         R_rpy = self.R_from_RPY(rpy)
-        # The spherical joint is implemented as a sequence of 3 revolute joints:
-        # 1. Roll (around X)
-        # 2. Pitch (around Y)
-        # 3. Yaw (around Z)
-        # This corresponds to the rotation matrix R = Rx(q[0]) @ Ry(q[1]) @ Rz(q[2])
-        R_rel = self.Rx(q[..., 0]) @ self.Ry(q[..., 1]) @ self.Rz(q[..., 2])
-        R = R_rpy @ R_rel
+        # The spherical joint rotation is:
+        # R_total = R_rest * R_delta
+        # where R_delta is the rotation from the quaternion
+        # This matches iDynTree's SphericalJoint convention
+        R_delta = self.R_from_quaternion(q)
+        R = R_rpy @ R_delta
         return self.homogeneous(R, xyz)
 
     def homogeneous(self, R, p):
