@@ -401,6 +401,62 @@ class SpatialMath:
         R = R_rpy @ R_axis
         return self.homogeneous(R, xyz)
 
+    def R_from_quaternion(self, q: npt.ArrayLike) -> npt.ArrayLike:
+        """Compute rotation matrix from unit quaternion (w, x, y, z).
+
+        Args:
+            q (npt.ArrayLike): unit quaternion with shape (..., 4) where q = [w, x, y, z]
+                              w is the real (scalar) part, (x, y, z) is the imaginary part
+
+        Returns:
+            npt.ArrayLike: rotation matrix with shape (..., 3, 3)
+        """
+        # Extract components
+        w = q[..., 0]
+        x = q[..., 1]
+        y = q[..., 2]
+        z = q[..., 3]
+
+        # Normalize quaternion (in case it's not perfectly unit)
+        norm_sq = w * w + x * x + y * y + z * z
+        norm = self.sqrt(norm_sq)
+        w = w / norm
+        x = x / norm
+        y = y / norm
+        z = z / norm
+
+        # Compute rotation matrix elements
+        # R = [[1-2(y²+z²), 2(xy-wz), 2(xz+wy)],
+        #      [2(xy+wz), 1-2(x²+z²), 2(yz-wx)],
+        #      [2(xz-wy), 2(yz+wx), 1-2(x²+y²)]]
+        one = self.factory.ones_like(w)
+        two = one + one
+
+        xx = x * x
+        yy = y * y
+        zz = z * z
+        xy = x * y
+        xz = x * z
+        yz = y * z
+        wx = w * x
+        wy = w * y
+        wz = w * z
+
+        r00 = one - two * (yy + zz)
+        r01 = two * (xy - wz)
+        r02 = two * (xz + wy)
+        r10 = two * (xy + wz)
+        r11 = one - two * (xx + zz)
+        r12 = two * (yz - wx)
+        r20 = two * (xz - wy)
+        r21 = two * (yz + wx)
+        r22 = one - two * (xx + yy)
+
+        row0 = self.stack([r00, r01, r02], axis=-1)
+        row1 = self.stack([r10, r11, r12], axis=-1)
+        row2 = self.stack([r20, r21, r22], axis=-1)
+        return self.stack([row0, row1, row2], axis=-2)
+
     def H_spherical_joint(
         self, xyz: npt.ArrayLike, rpy: npt.ArrayLike, q: npt.ArrayLike
     ) -> npt.ArrayLike:
