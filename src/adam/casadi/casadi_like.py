@@ -90,10 +90,17 @@ class CasadiLike(ArrayLike):
 
     @property
     def shape(self) -> tuple[int, ...]:
-        return self.array.shape
+        r, c = self.array.shape
+        # Treat column/row vectors as 1-D for shape inference convenience.
+        if r != 1 and c == 1:
+            return (r,)
+        if r == 1 and c != 1:
+            return (c,)
+        return (r, c)
 
     @property
     def ndim(self) -> int:
+        # CasADi SX/DM lacks ndim attribute; infer from shape length.
         return len(self.array.shape)
 
     @property
@@ -188,6 +195,8 @@ class SpatialMath(_SpatialMath):
 
     def __init__(self, spec=None):
         super().__init__(CasadiLikeFactory(spec))
+        # Provide array-namespace helper for base SpatialMath utilities
+        self._xp = lambda *args, **kwargs: cs
 
     @staticmethod
     def sin(x: CasadiLike) -> CasadiLike:

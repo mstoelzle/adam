@@ -779,11 +779,22 @@ class SpatialMath:
     def mxv(self, m: npt.ArrayLike, v: npt.ArrayLike) -> npt.ArrayLike:
         """
         Args:
-            m (npt.ArrayLike): Matrix
-            v (npt.ArrayLike): Vector
+            m (npt.ArrayLike): Matrix (..., r, c)
+            v (npt.ArrayLike): Vector (..., c) or column vector (c, 1) for non-batched case
         Returns:
-            npt.ArrayLike: Result of matrix-vector multiplication
+            npt.ArrayLike: Result of matrix-vector multiplication (..., r)
         """
+        # Handle exactly 2D column vectors (c, 1) by squeezing to (c,)
+        # This is for non-batched cases where mtimes produces (n, 1) results
+        # We detect a true column vector when:
+        # - v is 2D with shape (n, 1)
+        # - m is also 2D (non-batched), so m.shape[-1] should equal v.shape[0]
+        # For batched cases, m is 3D+ and v is (batch, n), so we don't squeeze
+        if (hasattr(v, 'shape') and hasattr(m, 'shape') and 
+            len(v.shape) == 2 and v.shape[-1] == 1 and
+            len(m.shape) == 2 and m.shape[-1] == v.shape[0]):
+            # True column vector from mtimes: squeeze (n, 1) → (n,)
+            v = v[..., 0]
         res = m @ v[..., None]
         return res[..., 0]  # Remove the extra dimension
 

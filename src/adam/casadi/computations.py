@@ -33,6 +33,7 @@ class KinDynComputations:
         model = Model.build(factory=factory, joints_name_list=joints_name_list)
         self.rbdalgos = RBDAlgorithms(model=model, math=math)
         self.NDoF = self.rbdalgos.NDoF
+        self.NPosDof = self.rbdalgos.NPosDof
         self.g = gravity
         self.f_opts = f_opts
         if root_link is not None:
@@ -59,7 +60,7 @@ class KinDynComputations:
             M (casADi function): Mass Matrix
         """
         base_transform = cs.SX.sym("H", 4, 4)
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         M, _ = self.rbdalgos.crba(base_transform, joint_positions)
         return cs.Function(
             "M", [base_transform, joint_positions], [M.array], self.f_opts
@@ -72,7 +73,7 @@ class KinDynComputations:
             Jcc (casADi function): Centroidal Momentum matrix
         """
         base_transform = cs.SX.sym("H", 4, 4)
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         _, Jcm = self.rbdalgos.crba(base_transform, joint_positions)
         return cs.Function(
             "Jcm", [base_transform, joint_positions], [Jcm.array], self.f_opts
@@ -87,7 +88,7 @@ class KinDynComputations:
         Returns:
             H (casADi function): The fk represented as Homogenous transformation matrix
         """
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         base_transform = cs.SX.sym("H", 4, 4)
         H = self.rbdalgos.forward_kinematics(frame, base_transform, joint_positions)
         return cs.Function(
@@ -103,7 +104,7 @@ class KinDynComputations:
         Returns:
             J_tot (casADi function): The Jacobian relative to the frame
         """
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         base_transform = cs.SX.sym("H", 4, 4)
         J_tot = self.rbdalgos.jacobian(frame, base_transform, joint_positions)
         return cs.Function(
@@ -119,7 +120,7 @@ class KinDynComputations:
         Returns:
             J (casADi function): The Jacobian between the root and the frame
         """
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         J = self.rbdalgos.relative_jacobian(frame, joint_positions)
         return cs.Function("J", [joint_positions], [J.array], self.f_opts)
 
@@ -133,7 +134,7 @@ class KinDynComputations:
             J_dot (casADi function): The Jacobian derivative relative to the frame
         """
         base_transform = cs.SX.sym("H", 4, 4)
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         base_velocity = cs.SX.sym("v_b", 6)
         joint_velocities = cs.SX.sym("s_dot", self.NDoF)
         J_dot = self.rbdalgos.jacobian_dot(
@@ -152,7 +153,7 @@ class KinDynComputations:
         Returns:
             CoM (casADi function): The CoM position
         """
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         base_transform = cs.SX.sym("H", 4, 4)
         com_pos = self.rbdalgos.CoM_position(base_transform, joint_positions)
         return cs.Function(
@@ -165,7 +166,7 @@ class KinDynComputations:
         Returns:
             J_com (casADi function): The CoM Jacobian
         """
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         base_transform = cs.SX.sym("H", 4, 4)
         J_com = self.rbdalgos.CoM_jacobian(base_transform, joint_positions)
         return cs.Function(
@@ -180,7 +181,7 @@ class KinDynComputations:
             h (casADi function): the bias force
         """
         base_transform = cs.SX.sym("H", 4, 4)
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         base_velocity = cs.SX.sym("v_b", 6)
         joint_velocities = cs.SX.sym("s_dot", self.NDoF)
         h = self.rbdalgos.rnea(
@@ -201,7 +202,7 @@ class KinDynComputations:
             C (casADi function): the Coriolis term
         """
         base_transform = cs.SX.sym("H", 4, 4)
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         base_velocity = cs.SX.sym("v_b", 6)
         joint_velocities = cs.SX.sym("s_dot", self.NDoF)
         # set in the bias force computation the gravity term to zero
@@ -227,7 +228,7 @@ class KinDynComputations:
             G (casADi function): the gravity term
         """
         base_transform = cs.SX.sym("H", 4, 4)
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         # set in the bias force computation the velocity to zero
         G = self.rbdalgos.rnea(
             base_transform, joint_positions, np.zeros(6), np.zeros(self.NDoF), self.g
@@ -517,7 +518,7 @@ class KinDynComputations:
             qdd (casADi function): The joint accelerations and base acceleration
         """
         base_transform = cs.SX.sym("H", 4, 4)
-        joint_positions = cs.SX.sym("s", self.NDoF)
+        joint_positions = cs.SX.sym("s", self.NPosDof)
         base_velocity = cs.SX.sym("v_b", 6)
         joint_velocities = cs.SX.sym("s_dot", self.NDoF)
         joint_torques = cs.SX.sym("tau", self.NDoF)

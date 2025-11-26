@@ -33,6 +33,9 @@ class RBDAlgorithms:
         self._root_motion_subspace = self.math.factory.eye(6)
         self._prepare_tree_cache()
 
+        # add boolean to check if casadi math is used
+        self._is_casadi_math = type(math.factory).__name__ == "CasadiLikeFactory"
+
     def set_frame_velocity_representation(self, representation: Representations):
         """Sets the frame velocity representation
 
@@ -1051,6 +1054,7 @@ class RBDAlgorithms:
                     )
                 Si_T_pA = math.mxv(math.swapaxes(Si, -2, -1), pA[idx])
                 u_i = tau_vec - Si_T_pA
+                u_i = self._ensure_vector(u_i, dof_count, batch_shape)
 
                 d_list[idx] = d_i
                 u_list[idx] = u_i
@@ -1062,7 +1066,12 @@ class RBDAlgorithms:
                     U_i, math.mtimes(inv_d, math.swapaxes(U_i, -2, -1))
                 )
                 gain = math.mtimes(inv_d, expand_to_match(u_i, inv_d))
-                gain_vec = gain[..., 0]
+                if self._is_casadi_math:
+                    # we need to preserve the extra dimension for casadi
+                    gain_vec = gain
+                else:
+                    # for other backends, we can squeeze the last dimension
+                    gain_vec = gain[..., 0]
                 pa = pA[idx] + math.mxv(Ia, c[idx]) + math.mxv(U_i, gain_vec)
             else:
                 Ia = IA[idx]
@@ -1184,6 +1193,14 @@ class RBDAlgorithms:
         self, vec: npt.ArrayLike, dof_count: int, batch_shape: tuple[int, ...]
     ) -> npt.ArrayLike:
         """Ensure joint coordinate vectors have an explicit trailing dimension."""
+        arr = getattr(vec, "array", None)
+        # If CasADi/ArrayAPI row vector (1, dof) was produced, transpose to column
+        if arr is not None and len(getattr(arr, "shape", ())) == 2:
+            r, c = arr.shape
+            if r == 1 and c == dof_count:
+                return self.math.factory.asarray(arr.T)
+            if c == 1 and r == dof_count:
+                return vec
         if dof_count == 0:
             return vec
         # If vec has no trailing dimension, add one
