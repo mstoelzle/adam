@@ -20,7 +20,7 @@ def _to_sequence(x) -> list[float]:
     # Unwrap wrapper that stores the underlying array in `.array`
     val = x.array if isinstance(x, ArrayLike) else x
     if isinstance(val, (cs.DM, cs.SX, cs.MX)):
-        val = [float(v) for v in cs.DM(val).full()]
+        val = [float(v.item() if isinstance(v, np.ndarray) else v) for v in cs.DM(val).full()]
         return val
 
     for i, v in enumerate(val):
@@ -39,6 +39,8 @@ def _to_scalar(x) -> float:
     val = x.array if isinstance(x, ArrayLike) else x
     # Handle CasADi types if available. It should be already a casadi type, but let's be safe
     val = cs.DM(val).full() if isinstance(val, (cs.DM, cs.SX, cs.MX)) else val
+    # If the value is a numpy array, extract the scalar
+    val = val.item() if isinstance(val, np.ndarray) else val
     return float(val)
 
 
